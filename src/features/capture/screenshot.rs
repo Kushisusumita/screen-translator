@@ -10,9 +10,9 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
 
 pub unsafe fn capture_region(x: i32, y: i32, w: i32, h: i32) -> Result<Vec<u8>, AppError> {
-    if w <= 0 || h <= 0 {
+    if w < 8 || h < 8 {
         return Err(AppError::Other(format!(
-            "Invalid capture region dimensions: {}x{}",
+            "Selection too small: {}x{} (minimum 8×8 pixels)",
             w, h
         )));
     }

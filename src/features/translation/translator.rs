@@ -40,10 +40,18 @@ pub async fn translate(
     warmup_session().await;
 
     if use_yandex {
+        // 1. Static HTML scrape — works if Yandex ever adds SSR.
         match yandex_web_scrape(text, src, tgt).await {
             Ok(t) if !t.is_empty() => return Ok(t),
-            Ok(_) => warn!("Yandex web scrape returned empty"),
-            Err(e) => warn!("Yandex web scrape: {}", e),
+            Ok(_) => warn!("Yandex web scrape returned empty, trying headless"),
+            Err(e) => warn!("Yandex web scrape: {} — trying headless", e),
+        }
+
+        // 2. Headless browser — browser found via Windows Registry (disk-agnostic).
+        match yandex_headless(text, src, tgt).await {
+            Ok(t) if !t.is_empty() => return Ok(t),
+            Ok(_) => warn!("Yandex headless returned empty"),
+            Err(e) => warn!("Yandex headless: {}", e),
         }
     }
 
@@ -319,6 +327,114 @@ fn extract_from_meta(html: &str, markers: &[&str]) -> Option<String> {
         }
     }
     None
+}
+
+// ── Yandex headless (Chromium CDP) ───────────────────────────────────────────
+
+/// Find a Chromium-based browser via the Windows Registry.
+/// Chrome, Edge and other Chromium browsers register their path under
+/// `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\<exe>`.
+/// This is disk-agnostic — works regardless of install drive or folder.
+fn find_chromium_executable() -> Option<std::path::PathBuf> {
+    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};
+    use winreg::RegKey;
+
+    // Edge is installed on every Windows 10/11 machine.
+    // Chrome is checked first because it tends to start slightly faster.
+    let candidates = ["chrome.exe", "msedge.exe", "chromium.exe"];
+
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    for exe in &candidates {
+        let key_path = format!(
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{}",
+            exe
+        );
+        if let Ok(key) = hklm.open_subkey_with_flags(&key_path, KEY_READ) {
+            // Default value ("") holds the full path to the executable.
+            if let Ok(path) = key.get_value::<String, _>("") {
+                let p = std::path::PathBuf::from(&path);
+                if p.exists() {
+                    info!("Found browser via registry: {}", p.display());
+                    return Some(p);
+                }
+            }
+        }
+    }
+
+    warn!("No Chromium-based browser found in registry (chrome.exe / msedge.exe)");
+    None
+}
+
+/// Launch a headless Chromium browser (Chrome or Edge), navigate to
+/// translate.yandex.ru, and poll until the SPA renders the translated text.
+async fn yandex_headless(text: &str, src: &str, tgt: &str) -> Result<String, AppError> {
+    use chromiumoxide::{Browser, BrowserConfig};
+    use futures::StreamExt as _;
+    use tokio::time::{sleep, timeout, Duration};
+
+    let exe = find_chromium_executable().ok_or_else(|| {
+        AppError::Other(
+            "headless: no Chromium browser found (Chrome or Edge required)".into(),
+        )
+    })?;
+    info!("Yandex headless: browser = {}", exe.display());
+
+    let url = format!(
+        "https://translate.yandex.ru/?source_lang={}&target_lang={}&text={}",
+        src,
+        tgt,
+        urlencoding::encode(text)
+    );
+
+    let config = BrowserConfig::builder()
+        .chrome_executable(&exe)
+        .arg("--headless=new")
+        .arg("--no-sandbox")
+        .arg("--disable-gpu")
+        .arg("--disable-dev-shm-usage")
+        .build()
+        .map_err(|e| AppError::Other(format!("Browser config: {}", e)))?;
+
+    let (mut browser, mut handler) = Browser::launch(config)
+        .await
+        .map_err(|e| AppError::Other(format!("Browser launch: {}", e)))?;
+
+    // CDP handler must be polled from a separate task.
+    let _driver = tokio::spawn(async move {
+        while let Some(_) = handler.next().await {}
+    });
+
+    let page = browser
+        .new_page(&url)
+        .await
+        .map_err(|e| AppError::Other(format!("Browser page: {}", e)))?;
+
+    // Yandex Translate is a SPA — poll via JS until the output textbox appears.
+    // Input area has id="fakeArea"; output area has role="textbox" without that id.
+    const POLL_JS: &str = r#"(() => {
+        const el = document.querySelector('[role="textbox"]:not([id="fakeArea"])');
+        const t = el && el.innerText.trim();
+        return t || null;
+    })()"#;
+
+    let result = timeout(Duration::from_secs(30), async {
+        loop {
+            if let Ok(val) = page.evaluate(POLL_JS).await {
+                if let Ok(Some(t)) = val.into_value::<Option<String>>() {
+                    if !t.is_empty() {
+                        break t;
+                    }
+                }
+            }
+            sleep(Duration::from_millis(400)).await;
+        }
+    })
+    .await
+    .map_err(|_| AppError::Other("Timeout: Yandex did not translate within 30s".into()))?;
+
+    let _ = browser.close().await;
+    info!("Yandex headless result len={}", result.len());
+    Ok(result)
 }
 
 // ── Google Translate ──────────────────────────────────────────────────────────

@@ -14,9 +14,7 @@ pub static HTTP: Lazy<reqwest::Client> = Lazy::new(|| {
         .expect("Failed to build HTTP client")
 });
 
-/// Session ID used for both OCR and Translate requests.
-/// Format: `{rand8hex}.{rand8hex}.{rand8hex}.74722d696d616765`
-/// The last segment is "tr-image" encoded as hex (constant, matches Yandex web app).
+/// Session ID for OCR requests — last segment is "tr-image" in hex.
 pub fn generate_sid() -> String {
     let mut rng = rand::thread_rng();
     let a: u32 = rng.gen();

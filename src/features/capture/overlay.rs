@@ -69,7 +69,7 @@ pub fn render_overlay(ctx: &egui::Context, state: &mut OverlayState) {
             if response.drag_stopped() {
                 if let (Some(start), Some(current)) = (state.start, state.current) {
                     let rect = Rect::from_two_pos(start, current);
-                    if rect.width() > 5.0 && rect.height() > 5.0 {
+                    if rect.width() >= 8.0 && rect.height() >= 8.0 {
                         state.completed = Some(rect);
                     } else {
                         state.start = None;
