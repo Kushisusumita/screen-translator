@@ -1,6 +1,7 @@
-mod client;
-mod translator;
+pub mod cache;
+pub mod client;
 pub mod ocr;
 pub mod pipeline;
+pub mod providers;
 
-pub use pipeline::{run_pipeline, PipelineResult};
+pub use pipeline::{run as run_pipeline, PipelineParams, PipelineResult};

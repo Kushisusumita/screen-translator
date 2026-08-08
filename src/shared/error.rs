@@ -16,15 +16,15 @@ pub enum AppError {
 impl fmt::Display for AppError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            AppError::Io(e) => write!(f, "IO error: {}", e),
-            AppError::Reqwest(e) => write!(f, "HTTP error: {}", e),
-            AppError::Json(e) => write!(f, "JSON error: {}", e),
-            AppError::Toml(e) => write!(f, "TOML parse error: {}", e),
-            AppError::TomlSer(e) => write!(f, "TOML serialize error: {}", e),
-            AppError::Windows(e) => write!(f, "Windows API error: {}", e),
-            AppError::Image(e) => write!(f, "Image error: {}", e),
-            AppError::Clipboard(e) => write!(f, "Clipboard error: {}", e),
-            AppError::Other(s) => write!(f, "Error: {}", s),
+            AppError::Io(e) => write!(f, "IO error: {e}"),
+            AppError::Reqwest(e) => write!(f, "HTTP error: {e}"),
+            AppError::Json(e) => write!(f, "JSON error: {e}"),
+            AppError::Toml(e) => write!(f, "TOML parse error: {e}"),
+            AppError::TomlSer(e) => write!(f, "TOML serialize error: {e}"),
+            AppError::Windows(e) => write!(f, "Windows API error: {e}"),
+            AppError::Image(e) => write!(f, "Image error: {e}"),
+            AppError::Clipboard(e) => write!(f, "Clipboard error: {e}"),
+            AppError::Other(s) => write!(f, "Error: {s}"),
         }
     }
 }
