@@ -13,9 +13,15 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// Marks values that went through DPAPI. Anything else is treated as a key the
-/// user pasted into the file by hand and is re-sealed on the next save.
-const SEALED_PREFIX: &str = "dpapi:";
+/// Marks values that went through this platform's sealing. Anything else is
+/// treated as a key the user pasted into the file by hand and is re-sealed on
+/// the next save.
+const SEALED_PREFIX: &str = if cfg!(windows) { "dpapi:" } else { "keyring:" };
+
+/// Both spellings are recognised on read. A config file carried between
+/// platforms cannot be unsealed either way — the point is to recognise it as
+/// sealed rather than hand the ciphertext to a translation API as a token.
+const SEALED_PREFIXES: [&str; 2] = ["dpapi:", "keyring:"];
 
 /// An API token. Never printed by `Debug` or `Display`.
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -60,9 +66,13 @@ impl Serialize for Secret {
 impl<'de> Deserialize<'de> for Secret {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let raw = String::deserialize(d)?;
-        match raw.strip_prefix(SEALED_PREFIX) {
-            // A key sealed by another user account cannot be opened here. Treat
-            // it as absent rather than failing the whole config parse.
+        match SEALED_PREFIXES
+            .iter()
+            .find_map(|p| raw.strip_prefix(p))
+        {
+            // A key sealed by another user account — or on another platform —
+            // cannot be opened here. Treat it as absent rather than failing the
+            // whole config parse.
             Some(sealed) => Ok(Secret(unseal(sealed).unwrap_or_default())),
             None => Ok(Secret(raw)),
         }
@@ -142,21 +152,113 @@ fn unseal(sealed: &str) -> Option<String> {
     }
 }
 
-/// No sealing available — the token is stored as typed. macOS should route this
-/// through the Keychain; until then the settings UI says so out loud.
 #[cfg(not(windows))]
-fn seal(_plain: &str) -> Option<String> {
-    None
+fn seal(plain: &str) -> Option<String> {
+    keychain::seal(plain)
 }
 
 #[cfg(not(windows))]
-fn unseal(_sealed: &str) -> Option<String> {
-    None
+fn unseal(sealed: &str) -> Option<String> {
+    keychain::unseal(sealed)
 }
 
-/// Whether tokens are encrypted at rest on this platform.
-pub const fn sealing_available() -> bool {
-    cfg!(windows)
+/// The macOS Keychain and the Linux Secret Service stand in for DPAPI.
+///
+/// Neither seals a blob the way `CryptProtectData` does, so the shape is
+/// inverted: one random key lives in the OS store, and the config file holds
+/// tokens encrypted with it. The result is the same — a config file copied to
+/// another machine carries nothing usable — and the keychain gains exactly one
+/// entry rather than one per token.
+#[cfg(not(windows))]
+mod keychain {
+    use base64::Engine as _;
+    use chacha20poly1305::aead::{Aead, KeyInit};
+    use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+    use once_cell::sync::Lazy;
+    use rand::RngCore;
+    use tracing::warn;
+
+    const SERVICE: &str = "Sakura Screen Translator";
+    const ACCOUNT: &str = "config-encryption-key";
+    const NONCE_LEN: usize = 12;
+
+    /// Read once: every save and load would otherwise hit the OS store, and on
+    /// macOS a locked keychain prompts the user each time.
+    static CIPHER: Lazy<Option<ChaCha20Poly1305>> = Lazy::new(load_or_create_cipher);
+
+    fn load_or_create_cipher() -> Option<ChaCha20Poly1305> {
+        let entry = match keyring::Entry::new(SERVICE, ACCOUNT) {
+            Ok(e) => e,
+            Err(e) => {
+                warn!(error = %e, "No OS credential store; tokens stay unencrypted at rest");
+                return None;
+            }
+        };
+
+        if let Ok(stored) = entry.get_password() {
+            if let Some(key) = base64::engine::general_purpose::STANDARD
+                .decode(&stored)
+                .ok()
+                .filter(|k| k.len() == 32)
+            {
+                return Some(ChaCha20Poly1305::new(Key::from_slice(&key)));
+            }
+            warn!("The stored encryption key is unusable; replacing it");
+        }
+
+        let mut key = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut key);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(key);
+        if let Err(e) = entry.set_password(&encoded) {
+            warn!(error = %e, "Could not store the encryption key; tokens stay unencrypted");
+            return None;
+        }
+        Some(ChaCha20Poly1305::new(Key::from_slice(&key)))
+    }
+
+    pub fn seal(plain: &str) -> Option<String> {
+        let cipher = CIPHER.as_ref()?;
+        let mut nonce = [0u8; NONCE_LEN];
+        rand::thread_rng().fill_bytes(&mut nonce);
+        let ciphertext = cipher.encrypt(Nonce::from_slice(&nonce), plain.as_bytes()).ok()?;
+
+        let mut blob = Vec::with_capacity(NONCE_LEN + ciphertext.len());
+        blob.extend_from_slice(&nonce);
+        blob.extend_from_slice(&ciphertext);
+        Some(base64::engine::general_purpose::STANDARD.encode(blob))
+    }
+
+    pub fn unseal(sealed: &str) -> Option<String> {
+        let cipher = CIPHER.as_ref()?;
+        let blob = base64::engine::general_purpose::STANDARD.decode(sealed).ok()?;
+        if blob.len() <= NONCE_LEN {
+            return None;
+        }
+        let (nonce, ciphertext) = blob.split_at(NONCE_LEN);
+        let plain = cipher.decrypt(Nonce::from_slice(nonce), ciphertext).ok()?;
+        String::from_utf8(plain).ok()
+    }
+
+    /// Whether the OS store answered at all.
+    pub fn available() -> bool {
+        CIPHER.is_some()
+    }
+}
+
+/// Whether tokens are encrypted at rest.
+///
+/// On Windows DPAPI is always there. Elsewhere it depends on the OS credential
+/// store answering — a Linux box with no Secret Service running has none — so
+/// the settings window asks rather than assumes.
+pub fn sealing_available() -> bool {
+    #[cfg(windows)]
+    {
+        true
+    }
+    #[cfg(not(windows))]
+    {
+        keychain::available()
+    }
 }
 
 #[cfg(test)]

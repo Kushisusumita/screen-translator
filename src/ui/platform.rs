@@ -150,7 +150,22 @@ impl Platform {
     }
 
     /// Candidate UI font files, best first. Missing files are skipped.
+    ///
+    /// Linux borrows the Fluent look — there is no third round of the design —
+    /// but not the font paths, which would all be `C:\Windows\Fonts`. Falling
+    /// through to egui's built-in face would cost the app every CJK glyph, and
+    /// CJK is most of what it is asked to translate.
     pub const fn ui_font_candidates(self) -> &'static [&'static str] {
+        #[cfg(all(unix, not(target_os = "macos")))]
+        return &[
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            "/usr/share/fonts/gnu-free/FreeSans.otf",
+        ];
+
+        #[allow(unreachable_code)]
         match self {
             Platform::Windows => &[
                 r"C:\Windows\Fonts\SegUIVar.ttf",
@@ -167,6 +182,14 @@ impl Platform {
 
     /// Monospace face for key badges and size labels.
     pub const fn mono_font_candidates(self) -> &'static [&'static str] {
+        #[cfg(all(unix, not(target_os = "macos")))]
+        return &[
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+            "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+        ];
+
+        #[allow(unreachable_code)]
         match self {
             Platform::Windows => &[
                 r"C:\Windows\Fonts\consola.ttf",
@@ -183,6 +206,15 @@ impl Platform {
     /// reporting a taller ascent than the Latin face, which otherwise makes
     /// kana float above the baseline inside a mixed run.
     pub const fn cjk_font_candidates(self) -> &'static [(&'static str, f32)] {
+        #[cfg(all(unix, not(target_os = "macos")))]
+        return &[
+            ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 0.10),
+            ("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc", 0.10),
+            ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 0.10),
+            ("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc", 0.10),
+        ];
+
+        #[allow(unreachable_code)]
         match self {
             Platform::Windows => &[
                 (r"C:\Windows\Fonts\meiryo.ttc", 0.15),

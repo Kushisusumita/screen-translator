@@ -90,12 +90,15 @@ pub fn virtual_desktop() -> Bounds {
     }
     #[cfg(not(windows))]
     {
-        Bounds {
-            x: 0,
-            y: 0,
-            w: 1920,
-            h: 1080,
-        }
+        portable::virtual_desktop().unwrap_or_else(|| {
+            warn!("No monitor could be enumerated; falling back to 1920×1080");
+            Bounds {
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1080,
+            }
+        })
     }
 }
 
@@ -125,7 +128,7 @@ pub fn foreground_window_bounds() -> Option<Bounds> {
     }
     #[cfg(not(windows))]
     {
-        None
+        portable::focused_window_bounds().and_then(|b| b.clamp_to(virtual_desktop()))
     }
 }
 
@@ -241,10 +244,264 @@ fn grab(area: Bounds) -> Result<RawCapture, AppError> {
 }
 
 #[cfg(not(windows))]
-fn grab(_area: Bounds) -> Result<RawCapture, AppError> {
-    Err(AppError::Other(
-        "захват экрана на этой платформе не реализован".into(),
-    ))
+fn grab(area: Bounds) -> Result<RawCapture, AppError> {
+    portable::grab(area)
+}
+
+/// Monitor scale factors, for converting `xcap`'s logical geometry. Only the
+/// platforms that go through `xcap` have one.
+#[cfg(not(windows))]
+pub use portable::ScaleMap;
+
+/// macOS and Linux capture, on top of `xcap` — ScreenCaptureKit / CoreGraphics
+/// on macOS, X11 or the Wayland portal on Linux.
+///
+/// `xcap` speaks logical points for geometry but returns physical pixels, so
+/// every rectangle is multiplied by the monitor's scale factor on the way in.
+/// Past this module the rest of the app only ever sees desktop physical pixels,
+/// exactly as it does on Windows.
+#[cfg(not(windows))]
+mod portable {
+    use super::{Bounds, RawCapture};
+    use crate::shared::error::AppError;
+    use tracing::{debug, warn};
+    use xcap::image::RgbaImage;
+    use xcap::Monitor;
+
+    /// A monitor with its frame already converted to desktop physical pixels.
+    struct Screen {
+        bounds: Bounds,
+        scale: f32,
+        monitor: Monitor,
+    }
+
+    fn screens() -> Vec<Screen> {
+        let monitors = match Monitor::all() {
+            Ok(m) => m,
+            Err(e) => {
+                warn!(error = %e, "Could not enumerate monitors");
+                return Vec::new();
+            }
+        };
+
+        monitors
+            .into_iter()
+            .filter_map(|monitor| {
+                let scale = match monitor.scale_factor() {
+                    Ok(s) if s > 0.0 => s,
+                    _ => 1.0,
+                };
+                let x = monitor.x().ok()?;
+                let y = monitor.y().ok()?;
+                let w = monitor.width().ok()? as i32;
+                let h = monitor.height().ok()? as i32;
+                if w <= 0 || h <= 0 {
+                    return None;
+                }
+                Some(Screen {
+                    bounds: Bounds {
+                        x: scaled(x, scale),
+                        y: scaled(y, scale),
+                        w: scaled(w, scale),
+                        h: scaled(h, scale),
+                    },
+                    scale,
+                    monitor,
+                })
+            })
+            .collect()
+    }
+
+    fn scaled(v: i32, scale: f32) -> i32 {
+        (v as f32 * scale).round() as i32
+    }
+
+    /// Union of every monitor, in desktop physical pixels.
+    pub fn virtual_desktop() -> Option<Bounds> {
+        let screens = screens();
+        let (first, rest) = screens.split_first()?;
+        let mut union = first.bounds;
+        for s in rest {
+            let x = union.x.min(s.bounds.x);
+            let y = union.y.min(s.bounds.y);
+            let right = union.right().max(s.bounds.right());
+            let bottom = union.bottom().max(s.bounds.bottom());
+            union = Bounds {
+                x,
+                y,
+                w: right - x,
+                h: bottom - y,
+            };
+        }
+        Some(union)
+    }
+
+    /// Frame of the focused window, if the platform will say which one it is.
+    pub fn focused_window_bounds() -> Option<Bounds> {
+        let windows = xcap::Window::all().ok()?;
+        // Monitors are needed for the scale factor: window geometry, like
+        // monitor geometry, comes back in logical points.
+        let screens = screens();
+
+        for w in windows {
+            if !w.is_focused().unwrap_or(false) || w.is_minimized().unwrap_or(false) {
+                continue;
+            }
+            let (x, y) = (w.x().ok()?, w.y().ok()?);
+            let (width, height) = (w.width().ok()? as i32, w.height().ok()? as i32);
+            let scale = scale_at(&screens, x, y);
+            let bounds = Bounds {
+                x: scaled(x, scale),
+                y: scaled(y, scale),
+                w: scaled(width, scale),
+                h: scaled(height, scale),
+            };
+            if bounds.w < 16 || bounds.h < 16 {
+                continue;
+            }
+            return Some(bounds);
+        }
+        None
+    }
+
+    /// The monitor layout, taken once, for callers that convert a whole list of
+    /// rectangles — enumerating monitors per window would be a syscall each.
+    pub struct ScaleMap {
+        /// Logical frame of each monitor, with its scale factor.
+        monitors: Vec<(Bounds, f32)>,
+    }
+
+    impl ScaleMap {
+        pub fn new() -> Self {
+            let monitors = screens()
+                .iter()
+                .map(|s| {
+                    let logical = Bounds {
+                        x: (s.bounds.x as f32 / s.scale).round() as i32,
+                        y: (s.bounds.y as f32 / s.scale).round() as i32,
+                        w: (s.bounds.w as f32 / s.scale).round() as i32,
+                        h: (s.bounds.h as f32 / s.scale).round() as i32,
+                    };
+                    (logical, s.scale)
+                })
+                .collect();
+            ScaleMap { monitors }
+        }
+
+        /// Scale factor of whichever monitor holds this logical point, so a
+        /// mixed-DPI desktop converts each window with its own factor.
+        pub fn at(&self, logical_x: i32, logical_y: i32) -> f32 {
+            for (frame, scale) in &self.monitors {
+                if logical_x >= frame.x
+                    && logical_x < frame.right()
+                    && logical_y >= frame.y
+                    && logical_y < frame.bottom()
+                {
+                    return *scale;
+                }
+            }
+            self.monitors.first().map(|(_, s)| *s).unwrap_or(1.0)
+        }
+    }
+
+    /// Scale factor of whichever monitor holds this logical point, so that a
+    /// mixed-DPI desktop converts each window with its own factor.
+    fn scale_at(screens: &[Screen], logical_x: i32, logical_y: i32) -> f32 {
+        for s in screens {
+            let lx = (s.bounds.x as f32 / s.scale).round() as i32;
+            let ly = (s.bounds.y as f32 / s.scale).round() as i32;
+            let lw = (s.bounds.w as f32 / s.scale).round() as i32;
+            let lh = (s.bounds.h as f32 / s.scale).round() as i32;
+            if logical_x >= lx && logical_x < lx + lw && logical_y >= ly && logical_y < ly + lh {
+                return s.scale;
+            }
+        }
+        screens.first().map(|s| s.scale).unwrap_or(1.0)
+    }
+
+    /// Same contract as the GDI path: BGRA at exactly `area`'s size, stitched
+    /// from every monitor the rectangle touches.
+    pub fn grab(area: Bounds) -> Result<RawCapture, AppError> {
+        if area.w <= 0 || area.h <= 0 {
+            return Err(AppError::Other("пустая область захвата".into()));
+        }
+
+        let screens = screens();
+        if screens.is_empty() {
+            return Err(AppError::Other("не найден ни один монитор".into()));
+        }
+
+        let mut bgra = vec![0u8; area.w as usize * area.h as usize * 4];
+        let mut captured_any = false;
+        let mut last_error = None;
+
+        for s in &screens {
+            let Some(hit) = area.clamp_to(s.bounds) else {
+                continue;
+            };
+            // Monitor-relative, and back in logical points for xcap.
+            let lx = ((hit.x - s.bounds.x) as f32 / s.scale).round().max(0.0) as u32;
+            let ly = ((hit.y - s.bounds.y) as f32 / s.scale).round().max(0.0) as u32;
+            let lw = ((hit.w as f32 / s.scale).round() as u32).max(1);
+            let lh = ((hit.h as f32 / s.scale).round() as u32).max(1);
+
+            match s.monitor.capture_region(lx, ly, lw, lh) {
+                Ok(image) => {
+                    blit(&image, hit, area, &mut bgra);
+                    captured_any = true;
+                }
+                Err(e) => {
+                    warn!(error = %e, "Capture from one monitor failed");
+                    last_error = Some(e.to_string());
+                }
+            }
+        }
+
+        if !captured_any {
+            return Err(AppError::Other(last_error.unwrap_or_else(|| {
+                "область захвата не попала ни на один монитор".into()
+            })));
+        }
+
+        debug!(w = area.w, h = area.h, "Captured via xcap");
+        Ok(RawCapture {
+            bgra,
+            w: area.w,
+            h: area.h,
+        })
+    }
+
+    /// Copies one monitor's slice into the output buffer, converting RGBA to
+    /// BGRA. The source is sampled rather than copied row-for-row because
+    /// rounding a scaled rectangle can leave it a pixel off the requested size.
+    fn blit(image: &RgbaImage, hit: Bounds, area: Bounds, out: &mut [u8]) {
+        let (iw, ih) = (image.width() as i32, image.height() as i32);
+        if iw <= 0 || ih <= 0 {
+            return;
+        }
+        let src = image.as_raw();
+
+        for row in 0..hit.h {
+            let dy = hit.y - area.y + row;
+            if dy < 0 || dy >= area.h {
+                continue;
+            }
+            let sy = (row * ih / hit.h).clamp(0, ih - 1);
+            for col in 0..hit.w {
+                let dx = hit.x - area.x + col;
+                if dx < 0 || dx >= area.w {
+                    continue;
+                }
+                let sx = (col * iw / hit.w).clamp(0, iw - 1);
+                let si = ((sy * iw + sx) * 4) as usize;
+                let di = ((dy * area.w + dx) * 4) as usize;
+                out[di] = src[si + 2];
+                out[di + 1] = src[si + 1];
+                out[di + 2] = src[si];
+                out[di + 3] = 255;
+            }
+        }
+    }
 }
 
 // ── Public capture API ───────────────────────────────────────────────────────
@@ -348,6 +605,45 @@ fn upscale_factor(w: u32, h: u32) -> u32 {
         scale -= 1;
     }
     scale
+}
+
+/// Live capture, checked against the machine it runs on.
+///
+/// Ignored by default: a CI runner has no display, and on macOS the first call
+/// raises the Screen Recording prompt. Run it with
+/// `cargo test -- --ignored capture` after granting the permission.
+#[cfg(all(test, not(windows)))]
+mod live_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "needs a real display and, on macOS, Screen Recording permission"]
+    fn the_desktop_capture_comes_back_at_the_size_that_was_asked_for() {
+        let desktop = virtual_desktop();
+        assert!(desktop.w > 0 && desktop.h > 0, "no usable desktop bounds");
+
+        let (image, area) = capture_desktop_image().expect("desktop capture");
+        assert_eq!(area, desktop);
+        assert_eq!(image.size, [desktop.w as usize, desktop.h as usize]);
+        assert_eq!(image.pixels.len(), (desktop.w * desktop.h) as usize);
+    }
+
+    #[test]
+    #[ignore = "needs a real display and, on macOS, Screen Recording permission"]
+    fn a_region_in_the_middle_of_the_desktop_captures_that_region() {
+        let desktop = virtual_desktop();
+        let region = Bounds {
+            x: desktop.x + desktop.w / 4,
+            y: desktop.y + desktop.h / 4,
+            w: 320,
+            h: 200,
+        };
+        // The OCR path re-encodes as JPEG, so a non-empty result means the
+        // whole chain — stitch, convert, encode — held together.
+        let jpeg = capture_region_for_ocr(region).expect("region capture");
+        assert!(jpeg.len() > 1024, "suspiciously small JPEG: {}", jpeg.len());
+        assert_eq!(&jpeg[..2], &[0xFF, 0xD8], "not a JPEG");
+    }
 }
 
 #[cfg(test)]

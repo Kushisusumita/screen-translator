@@ -1,3 +1,7 @@
+/// Only macOS needs the overlay window pushed past what the window server
+/// would otherwise allow.
+#[cfg(target_os = "macos")]
+pub mod mac_window;
 pub mod overlay;
 pub mod screenshot;
 pub mod window_pick;

@@ -173,7 +173,16 @@ pub fn render(ctx: &egui::Context, theme: &Theme, state: &mut OverlayState) {
                 }
             }
 
+            // A pointing arrow over a full-screen scrim says nothing about what
+            // is about to happen; the crosshair is what every capture tool on
+            // both platforms uses, and it aims to the pixel.
+            ctx.set_cursor_icon(match state.mode {
+                CaptureMode::Region => egui::CursorIcon::Crosshair,
+                CaptureMode::Window | CaptureMode::FullScreen => egui::CursorIcon::PointingHand,
+            });
+
             paint(ui, theme, state, screen, origin);
+            paint_cursor_readout(ui, state, screen, origin);
         });
 
     if state.completed.is_none() {
@@ -346,6 +355,72 @@ fn paint(ui: &mut egui::Ui, theme: &Theme, state: &OverlayState, screen: Rect, o
     painter.galley(badge.min + pad, galley, Color32::WHITE);
 }
 
+/// The coordinate box that follows the crosshair, the way macOS's own capture
+/// shows one.
+///
+/// Two lines, X over Y, in desktop physical pixels — the same unit as the size
+/// badge and as the image that comes back, so the number the user reads is the
+/// number they get. While a selection is being dragged the numbers track the
+/// corner under the cursor, which is what makes it possible to line an edge up
+/// with something exactly.
+fn paint_cursor_readout(ui: &egui::Ui, state: &OverlayState, screen: Rect, origin: Pos2) {
+    // Only the region mode aims at a point. Window mode aims at a window, and
+    // full screen has nothing to aim at.
+    if state.mode != CaptureMode::Region {
+        return;
+    }
+    let Some(pointer) = ui.ctx().pointer_latest_pos() else {
+        return;
+    };
+    if !screen.contains(pointer) {
+        return;
+    }
+
+    let (x, y) = state.geometry.to_physical(pointer, origin);
+    let painter = ui.painter();
+    // Monospaced so the box does not twitch as the digits change.
+    let galley = painter.layout_no_wrap(format!("X {x}\nY {y}"), text::mono(), Color32::WHITE);
+
+    let pad = Vec2::new(7.0, 4.0);
+    let box_rect = readout_rect(pointer, galley.size() + pad * 2.0, screen);
+    painter.rect_filled(box_rect, 4.0, Color32::from_rgba_unmultiplied(0, 0, 0, 170));
+    painter.galley(box_rect.min + pad, galley, Color32::WHITE);
+}
+
+/// Places the readout below-right of the crosshair, flipping to the other side
+/// of it rather than sliding along the edge — a box that creeps over the cursor
+/// near a corner would cover the very pixels being aimed at.
+fn readout_rect(pointer: Pos2, size: Vec2, screen: Rect) -> Rect {
+    /// Clear of the crosshair's own arms.
+    const GAP: f32 = 16.0;
+    const MARGIN: f32 = 4.0;
+
+    let x = if pointer.x + GAP + size.x + MARGIN <= screen.max.x {
+        pointer.x + GAP
+    } else {
+        pointer.x - GAP - size.x
+    };
+    let y = if pointer.y + GAP + size.y + MARGIN <= screen.max.y {
+        pointer.y + GAP
+    } else {
+        pointer.y - GAP - size.y
+    };
+
+    // The lower bound wins if the box is wider than the space it has to live
+    // in. `clamp` panics when handed min > max, and a desktop narrower than the
+    // readout is unlikely but not impossible — a tiny secondary display, or a
+    // large interface scale.
+    let left = screen.min.x + MARGIN;
+    let top = screen.min.y + MARGIN;
+    Rect::from_min_size(
+        Pos2::new(
+            x.clamp(left, (screen.max.x - size.x - MARGIN).max(left)),
+            y.clamp(top, (screen.max.y - size.y - MARGIN).max(top)),
+        ),
+        size,
+    )
+}
+
 /// The strip at the top of the overlay: capture modes, plus a Cancel button that
 /// does what Esc does.
 ///
@@ -424,6 +499,57 @@ fn paint_hint(ctx: &egui::Context, theme: &Theme, state: &OverlayState) {
         .show(ctx, |ui| {
             widgets::hint_pill(ui, theme, &hint);
         });
+}
+
+#[cfg(test)]
+mod readout_tests {
+    use super::*;
+
+    const SCREEN: Rect = Rect {
+        min: Pos2::new(0.0, 0.0),
+        max: Pos2::new(1920.0, 1080.0),
+    };
+    const SIZE: Vec2 = Vec2::new(60.0, 34.0);
+
+    #[test]
+    fn it_sits_below_and_right_of_the_crosshair() {
+        let r = readout_rect(Pos2::new(500.0, 400.0), SIZE, SCREEN);
+        assert!(r.min.x > 500.0 && r.min.y > 400.0);
+    }
+
+    #[test]
+    fn near_the_right_edge_it_flips_to_the_other_side() {
+        let r = readout_rect(Pos2::new(1910.0, 400.0), SIZE, SCREEN);
+        assert!(r.max.x < 1910.0, "should not cover the pointer: {r:?}");
+        assert!(r.min.x >= SCREEN.min.x);
+    }
+
+    #[test]
+    fn near_the_bottom_edge_it_flips_upwards() {
+        let r = readout_rect(Pos2::new(500.0, 1075.0), SIZE, SCREEN);
+        assert!(r.max.y < 1075.0, "should not cover the pointer: {r:?}");
+    }
+
+    #[test]
+    fn it_never_leaves_the_overlay() {
+        for p in [
+            Pos2::new(0.0, 0.0),
+            Pos2::new(1920.0, 1080.0),
+            Pos2::new(1920.0, 0.0),
+            Pos2::new(0.0, 1080.0),
+        ] {
+            let r = readout_rect(p, SIZE, SCREEN);
+            assert!(SCREEN.contains_rect(r), "escaped the screen at {p:?}: {r:?}");
+        }
+    }
+
+    #[test]
+    fn a_screen_smaller_than_the_box_still_produces_a_sane_rect() {
+        let tiny = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(40.0, 20.0));
+        let r = readout_rect(Pos2::new(20.0, 10.0), SIZE, tiny);
+        assert!(r.min.x.is_finite() && r.min.y.is_finite());
+        assert!(r.min.x >= tiny.min.x && r.min.y >= tiny.min.y);
+    }
 }
 
 #[cfg(test)]

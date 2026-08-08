@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing should not hide the state of the other two.
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          # Cargo.lock is not committed, so the manifest is what keys the cache.
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.toml') }}
+
+      # Wayland/X11 for the window, GTK for the tray icon, xcb for capture.
+      - name: System libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev \
+            libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libwayland-dev libgl1-mesa-dev \
+            libayatana-appindicator3-dev
+
+      - name: Build
+        run: cargo build
+
+      - name: Test
+        run: cargo test
+
+      # Advisory: the point of this job is that all three platforms still
+      # compile and pass their tests, not that every lint is clean.
+      - name: Clippy
+        run: cargo clippy --all-targets

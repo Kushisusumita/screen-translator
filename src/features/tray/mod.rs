@@ -14,6 +14,7 @@
 use std::sync::mpsc::{channel, Receiver};
 use std::thread;
 
+#[cfg(windows)]
 use tracing::info;
 
 use crate::entities::settings::{CaptureMode, Hotkeys};
@@ -29,6 +30,8 @@ pub struct TrayManager {
     events: Receiver<TrayEvent>,
     #[cfg(windows)]
     control: win::Control,
+    #[cfg(not(windows))]
+    control: portable::Control,
     _thread: Option<thread::JoinHandle<()>>,
 }
 
@@ -47,11 +50,11 @@ impl TrayManager {
         }
         #[cfg(not(windows))]
         {
-            let _ = (hotkeys, tx, ctx, visible);
-            tracing::warn!("Tray icon is not implemented on this platform yet");
+            let (control, handle) = portable::spawn(hotkeys, tx, ctx, visible);
             TrayManager {
                 events: rx,
-                _thread: None,
+                control,
+                _thread: handle,
             }
         }
     }
@@ -62,32 +65,22 @@ impl TrayManager {
 
     /// Keeps the shortcut labels in the menu in step with the settings.
     pub fn update_hotkeys(&self, hotkeys: Hotkeys) {
-        #[cfg(windows)]
         self.control.update_hotkeys(hotkeys);
-        #[cfg(not(windows))]
-        let _ = hotkeys;
     }
 
     /// Spins the tray icon while a translation is in flight, and lets it settle
     /// back when the work is done.
     pub fn set_busy(&self, busy: bool) {
-        #[cfg(windows)]
         self.control.set_busy(busy);
-        #[cfg(not(windows))]
-        let _ = busy;
     }
 
     /// Adds or removes the icon without restarting the thread. The hotkeys keep
     /// working either way.
     pub fn set_visible(&self, visible: bool) {
-        #[cfg(windows)]
         self.control.set_visible(visible);
-        #[cfg(not(windows))]
-        let _ = visible;
     }
 
     pub fn shutdown(&self) {
-        #[cfg(windows)]
         self.control.shutdown();
     }
 }
@@ -109,6 +102,228 @@ pub fn app_icon(size: u32) -> egui::IconData {
         rgba: crate::shared::mark::rasterise(size),
         width: size,
         height: size,
+    }
+}
+
+/// macOS and Linux, on `tray-icon` — an `NSStatusItem` on macOS, a
+/// StatusNotifierItem (or the appindicator fallback) on Linux.
+///
+/// Like the hotkeys, the icon has to be created on the thread running the
+/// platform's event loop, so `spawn` builds it in place and the thread it
+/// starts only forwards events.
+#[cfg(not(windows))]
+mod portable {
+    use super::*;
+
+    use std::sync::mpsc::Sender;
+
+    use tracing::warn;
+    use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
+    use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+
+    use crate::entities::settings::Hotkey;
+
+    const TOOLTIP_IDLE: &str = "Sakura Screen Translator";
+    const TOOLTIP_BUSY: &str = "Sakura Screen Translator — перевод…";
+
+    pub struct Control {
+        /// `None` when the desktop has no tray at all — a bare window manager,
+        /// or a macOS session that refused a status item. Hotkeys still work.
+        tray: Option<TrayIcon>,
+        /// Held so the labels can be rewritten when a shortcut changes.
+        items: Option<Items>,
+    }
+
+    struct Items {
+        region: MenuItem,
+        window: MenuItem,
+        fullscreen: MenuItem,
+        /// The menu itself is kept alive by the tray icon; these are only for
+        /// matching an event back to what the user clicked.
+        _menu: Menu,
+    }
+
+    impl Control {
+        pub fn update_hotkeys(&self, hotkeys: Hotkeys) {
+            let Some(items) = self.items.as_ref() else {
+                return;
+            };
+            items
+                .region
+                .set_text(label(CaptureMode::Region.label_menu(), &hotkeys.region));
+            items
+                .window
+                .set_text(label(CaptureMode::Window.label_menu(), &hotkeys.window));
+            items.fullscreen.set_text(label(
+                CaptureMode::FullScreen.label_menu(),
+                &hotkeys.fullscreen,
+            ));
+        }
+
+        /// Neither platform animates a status item the way the Windows build
+        /// spins its icon — macOS in particular redraws the menu bar from the
+        /// main thread only — so the state is said in the tooltip instead.
+        pub fn set_busy(&self, busy: bool) {
+            if let Some(tray) = self.tray.as_ref() {
+                let _ = tray.set_tooltip(Some(if busy { TOOLTIP_BUSY } else { TOOLTIP_IDLE }));
+            }
+        }
+
+        pub fn set_visible(&self, visible: bool) {
+            if let Some(tray) = self.tray.as_ref() {
+                if let Err(e) = tray.set_visible(visible) {
+                    warn!(error = %e, "Could not change tray icon visibility");
+                }
+            }
+        }
+
+        pub fn shutdown(&self) {
+            // Dropping the icon removes it; hiding first means it goes away at
+            // the moment of the request rather than at the end of the frame.
+            self.set_visible(false);
+        }
+    }
+
+    /// `Перевести область   ⌃T`, the way each platform spells the shortcut.
+    fn label(text: &str, hotkey: &Hotkey) -> String {
+        if hotkey.is_bound() {
+            format!("{text}   {}", hotkey.display())
+        } else {
+            text.to_string()
+        }
+    }
+
+    pub fn spawn(
+        hotkeys: Hotkeys,
+        tx: Sender<TrayEvent>,
+        ctx: egui::Context,
+        visible: bool,
+    ) -> (Control, Option<thread::JoinHandle<()>>) {
+        let region = MenuItem::new(label(CaptureMode::Region.label_menu(), &hotkeys.region), true, None);
+        let window = MenuItem::new(label(CaptureMode::Window.label_menu(), &hotkeys.window), true, None);
+        let fullscreen = MenuItem::new(
+            label(CaptureMode::FullScreen.label_menu(), &hotkeys.fullscreen),
+            true,
+            None,
+        );
+        let settings = MenuItem::new("Параметры", true, None);
+        let exit = MenuItem::new("Выход", true, None);
+
+        let menu = Menu::new();
+        let built = menu
+            .append_items(&[
+                &region,
+                &window,
+                &fullscreen,
+                &PredefinedMenuItem::separator(),
+                &settings,
+                &exit,
+            ])
+            .is_ok();
+        if !built {
+            warn!("Could not build the tray menu");
+        }
+
+        // Ids are captured before the menu moves into the tray icon.
+        let ids = MenuIds {
+            region: region.id().clone(),
+            window: window.id().clone(),
+            fullscreen: fullscreen.id().clone(),
+            settings: settings.id().clone(),
+            exit: exit.id().clone(),
+        };
+
+        let mut builder = TrayIconBuilder::new()
+            .with_menu(Box::new(menu.clone()))
+            .with_tooltip(TOOLTIP_IDLE)
+            // macOS renders a template image as a monochrome menu-bar glyph
+            // that follows the system appearance; the mark is drawn in colour,
+            // so it is left as-is.
+            .with_icon_as_template(false)
+            .with_menu_on_left_click(true);
+
+        if let Some(icon) = tray_icon_image() {
+            builder = builder.with_icon(icon);
+        }
+
+        let tray = match builder.build() {
+            Ok(tray) => {
+                if !visible {
+                    let _ = tray.set_visible(false);
+                }
+                Some(tray)
+            }
+            Err(e) => {
+                warn!(error = %e, "No tray icon on this desktop");
+                None
+            }
+        };
+
+        let control = Control {
+            tray,
+            items: Some(Items {
+                region,
+                window,
+                fullscreen,
+                _menu: menu,
+            }),
+        };
+
+        // As with the hotkeys: the app only reads its channels during a frame,
+        // so every event has to ask for one.
+        let handle = thread::spawn(move || {
+            let receiver = MenuEvent::receiver();
+            while let Ok(event) = receiver.recv() {
+                let Some(tray_event) = ids.resolve(&event.id) else {
+                    continue;
+                };
+                if tx.send(tray_event).is_err() {
+                    break;
+                }
+                ctx.request_repaint();
+            }
+        });
+
+        (control, Some(handle))
+    }
+
+    struct MenuIds {
+        region: MenuId,
+        window: MenuId,
+        fullscreen: MenuId,
+        settings: MenuId,
+        exit: MenuId,
+    }
+
+    impl MenuIds {
+        fn resolve(&self, id: &MenuId) -> Option<TrayEvent> {
+            if id == &self.region {
+                Some(TrayEvent::Capture(CaptureMode::Region))
+            } else if id == &self.window {
+                Some(TrayEvent::Capture(CaptureMode::Window))
+            } else if id == &self.fullscreen {
+                Some(TrayEvent::Capture(CaptureMode::FullScreen))
+            } else if id == &self.settings {
+                Some(TrayEvent::ShowSettings)
+            } else if id == &self.exit {
+                Some(TrayEvent::Exit)
+            } else {
+                None
+            }
+        }
+    }
+
+    /// The same brand mark the window and the taskbar use, at a size the menu
+    /// bar can downscale cleanly.
+    fn tray_icon_image() -> Option<Icon> {
+        const SIZE: u32 = 32;
+        match Icon::from_rgba(crate::shared::mark::rasterise(SIZE), SIZE, SIZE) {
+            Ok(icon) => Some(icon),
+            Err(e) => {
+                warn!(error = %e, "Could not rasterise the tray icon");
+                None
+            }
+        }
     }
 }
 

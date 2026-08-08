@@ -5,6 +5,10 @@
 //! tray icon and the mark beside "Sakura" in the settings window cannot drift
 //! apart — they are all `shared::mark`.
 
+// The icon is only ever rasterised on a Windows host; elsewhere the geometry
+// below is compiled but unused.
+#![allow(dead_code, unused_imports)]
+
 use std::io::BufWriter;
 use std::path::PathBuf;
 
@@ -19,6 +23,15 @@ fn main() {
         return;
     }
 
+    embed_windows_icon();
+}
+
+/// `winres` is a build dependency of Windows hosts only, so this is compiled on
+/// the host that has it. Cross-compiling a Windows binary from macOS or Linux
+/// still produces a working executable — it just carries no Explorer icon,
+/// which the release builds (run on Windows) do.
+#[cfg(windows)]
+fn embed_windows_icon() {
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR is always set"));
     let ico_path = out_dir.join("sakura.ico");
 
@@ -35,6 +48,12 @@ fn main() {
     }
 }
 
+#[cfg(not(windows))]
+fn embed_windows_icon() {
+    println!("cargo:warning=cross-compiling for Windows: the icon resource is not embedded");
+}
+
+#[cfg(windows)]
 fn write_ico(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     use image::codecs::ico::{IcoEncoder, IcoFrame};
     use image::ExtendedColorType;

@@ -133,7 +133,15 @@ show_translation = true
         );
         let s = load(&text);
         assert_eq!(s.hotkeys.region.key, 0x57);
-        assert_eq!(s.hotkeys.region.display(), "Alt+Shift+W");
+        assert_eq!(s.hotkeys.region.modifiers & MOD_ALT, MOD_ALT);
+        assert_eq!(s.hotkeys.region.modifiers & MOD_SHIFT, MOD_SHIFT);
+        // How it is spelled is the platform's business — `Alt+Shift+W` on
+        // Windows, `⌥⇧W` on macOS — so the migration is checked against the
+        // same source of truth rather than against one platform's wording.
+        assert_eq!(
+            s.hotkeys.region.display(),
+            crate::ui::Platform::current().format_hotkey(MOD_ALT | MOD_SHIFT, "W")
+        );
     }
 
     #[test]

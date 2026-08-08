@@ -29,6 +29,40 @@ chromiumoxide = { version = "0.6", features = ["tokio-runtime"] }
 futures = "0.3"
 base64 = "0.22"
 
+# Everything below this line is per-platform on purpose: a Windows build must
+# not pull in a single macOS or Linux crate, and vice versa. Windows keeps its
+# hand-written Win32 implementations; the other platforms share portable crates.
+[target.'cfg(not(windows))'.dependencies]
+# Screen and window capture on macOS (ScreenCaptureKit / CoreGraphics) and Linux
+# (X11, Wayland via the portal).
+xcap = "0.9"
+# Global shortcuts: Carbon hotkeys on macOS, XGrabKey on Linux.
+global-hotkey = "0.8"
+# Tray icon: NSStatusItem on macOS, StatusNotifierItem / appindicator on Linux.
+tray-icon = "0.24"
+# Tokens at rest: the login Keychain on macOS and the Secret Service (GNOME
+# Keyring, KWallet) on Linux, the way DPAPI seals them on Windows. The default
+# feature set already picks the right backend per target.
+keyring = "4"
+# Neither store seals an arbitrary blob the way DPAPI does, so one key from the
+# store encrypts the config's tokens.
+chacha20poly1305 = "0.10"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# The capture overlay has to sit above the menu bar and the Dock, which is a
+# window level and a frame no winit or eframe API exposes.
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication",
+    "NSWindow",
+    "NSScreen",
+    "NSResponder",
+    # Carries NSApplicationActivationPolicy, which turns the process into a
+    # menu-bar agent so the overlay does not drag the user to another Space.
+    "NSRunningApplication",
+] }
+objc2-foundation = { version = "0.3", features = ["NSGeometry"] }
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
     "Win32_Foundation",
@@ -51,9 +85,12 @@ windows = { version = "0.58", features = [
 winreg = "0.52"
 
 [build-dependencies]
-winres = "0.1"
 # The build script rasterises the app icon from the same geometry the UI draws.
 image = { version = "0.25", default-features = false, features = ["png", "ico"] }
+
+# Only the Windows build embeds an icon resource in the executable.
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
 
 [profile.release]
 opt-level = 3

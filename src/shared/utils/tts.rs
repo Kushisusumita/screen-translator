@@ -11,6 +11,9 @@
 use std::io::Write;
 use std::process::Stdio;
 
+// Only the paths that wait on a child process report how it went; macOS's
+// `say` is fire-and-forget.
+#[cfg(any(windows, all(unix, not(target_os = "macos"))))]
 use tracing::{info, warn};
 
 use crate::shared::error::AppError;
@@ -77,11 +80,32 @@ pub fn speak(text: &str) -> Result<(), AppError> {
         Ok(())
     }
 
-    #[cfg(not(any(windows, target_os = "macos")))]
+    // Linux and the other unixes: speech-dispatcher is what desktop screen
+    // readers already talk to, so a system that speaks at all has it.
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
-        let _ = Stdio::null();
-        Err(AppError::Other(
-            "синтез речи на этой платформе недоступен".into(),
-        ))
+        let mut child = std::process::Command::new("spd-say")
+            // Wait for the previous utterance instead of cutting it off, and
+            // read stdin so the text never reaches the command line.
+            .args(["--wait", "-e"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| AppError::Other(format!("не запустить spd-say: {e}")))?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(text.as_bytes())
+                .map_err(|e| AppError::Other(format!("не передать текст: {e}")))?;
+        }
+
+        std::thread::spawn(move || match child.wait() {
+            Ok(status) if !status.success() => warn!(?status, "Speech synthesis exited badly"),
+            Err(e) => warn!(error = %e, "Speech synthesis could not be awaited"),
+            _ => info!("Speech finished"),
+        });
+
+        Ok(())
     }
 }

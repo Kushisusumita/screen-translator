@@ -21,7 +21,66 @@ pub fn enumerate() -> Vec<WindowInfo> {
     }
     #[cfg(not(windows))]
     {
-        Vec::new()
+        portable::enumerate()
+    }
+}
+
+/// macOS and Linux, through `xcap`.
+///
+/// `xcap` hands back geometry in logical points; the rest of the app works in
+/// desktop physical pixels, so each window is scaled by the factor of the
+/// monitor it sits on — the same conversion `screenshot::portable` makes.
+#[cfg(not(windows))]
+mod portable {
+    use super::{Bounds, WindowInfo};
+    use tracing::warn;
+
+    pub fn enumerate() -> Vec<WindowInfo> {
+        let windows = match xcap::Window::all() {
+            Ok(w) => w,
+            Err(e) => {
+                warn!(error = %e, "Could not enumerate windows");
+                return Vec::new();
+            }
+        };
+
+        let scales = super::super::screenshot::ScaleMap::new();
+
+        let mut listed: Vec<(i32, WindowInfo)> = windows
+            .into_iter()
+            .filter_map(|w| {
+                if w.is_minimized().unwrap_or(false) {
+                    return None;
+                }
+                let x = w.x().ok()?;
+                let y = w.y().ok()?;
+                let width = w.width().ok()? as i32;
+                let height = w.height().ok()? as i32;
+                let scale = scales.at(x, y);
+                let bounds = Bounds {
+                    x: (x as f32 * scale).round() as i32,
+                    y: (y as f32 * scale).round() as i32,
+                    w: (width as f32 * scale).round() as i32,
+                    h: (height as f32 * scale).round() as i32,
+                };
+                // Menu-bar extras, panels and other furniture are not things a
+                // user points at to translate, and they sit above everything
+                // else, so they would swallow every hit test.
+                if bounds.w < 120 || bounds.h < 80 {
+                    return None;
+                }
+                let title = match w.title() {
+                    Ok(t) if !t.is_empty() => t,
+                    _ => w.app_name().unwrap_or_default(),
+                };
+                Some((w.z().unwrap_or(0), WindowInfo { bounds, title }))
+            })
+            .collect();
+
+        // `hit_test` takes the first window that contains the point, so the
+        // list has to run front-most first. xcap orders by ascending z.
+        listed.sort_by_key(|(z, _)| std::cmp::Reverse(*z));
+        listed.into_iter().map(|(_, info)| info).collect()
     }
 }
 

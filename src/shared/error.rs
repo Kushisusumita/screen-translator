@@ -7,6 +7,7 @@ pub enum AppError {
     Json(serde_json::Error),
     Toml(toml::de::Error),
     TomlSer(toml::ser::Error),
+    #[cfg(windows)]
     Windows(windows::core::Error),
     Image(image::ImageError),
     Clipboard(arboard::Error),
@@ -21,6 +22,7 @@ impl fmt::Display for AppError {
             AppError::Json(e) => write!(f, "JSON error: {e}"),
             AppError::Toml(e) => write!(f, "TOML parse error: {e}"),
             AppError::TomlSer(e) => write!(f, "TOML serialize error: {e}"),
+            #[cfg(windows)]
             AppError::Windows(e) => write!(f, "Windows API error: {e}"),
             AppError::Image(e) => write!(f, "Image error: {e}"),
             AppError::Clipboard(e) => write!(f, "Clipboard error: {e}"),
@@ -61,6 +63,7 @@ impl From<toml::ser::Error> for AppError {
     }
 }
 
+#[cfg(windows)]
 impl From<windows::core::Error> for AppError {
     fn from(e: windows::core::Error) -> Self {
         AppError::Windows(e)

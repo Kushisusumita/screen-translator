@@ -1,8 +1,10 @@
 use crate::shared::error::AppError;
 
+#[cfg(windows)]
 const AUTOSTART_VALUE: &str = "SakuraScreenTranslator";
 /// Value name written by versions before the rename, cleaned up so a user who
 /// upgrades does not end up with the app starting twice.
+#[cfg(windows)]
 const LEGACY_VALUE: &str = "ScreenTranslator";
 
 /// Quotes the executable path for the `Run` key.
@@ -11,6 +13,10 @@ const LEGACY_VALUE: &str = "ScreenTranslator";
 /// `C:\Program.exe`, then `C:\Program Files\Sakura.exe`, and so on. Without the
 /// quotes, autostart from any path containing a space is ambiguous at best and
 /// hijackable at worst.
+///
+/// The other platforms have no equivalent: a LaunchAgent takes an argument
+/// vector and an XDG entry is parsed by the desktop, not by a shell.
+#[cfg(any(windows, test))]
 pub fn quote_command(exe_path: &str) -> String {
     let trimmed = exe_path.trim().trim_matches('"');
     format!("\"{trimmed}\"")
@@ -41,12 +47,109 @@ pub fn set_autostart(enabled: bool, exe_path: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-#[cfg(not(windows))]
-pub fn set_autostart(_enabled: bool, _exe_path: &str) -> Result<(), AppError> {
-    // macOS wants a LaunchAgent plist in ~/Library/LaunchAgents.
-    Err(AppError::Other(
-        "автозапуск на этой платформе пока не реализован".into(),
-    ))
+/// macOS: a per-user LaunchAgent. `launchd` reads the directory at login, so
+/// writing the file is the whole operation — no `launchctl load` needed for the
+/// next session.
+#[cfg(target_os = "macos")]
+pub fn set_autostart(enabled: bool, exe_path: &str) -> Result<(), AppError> {
+    let path = launch_agent_path()?;
+
+    if !enabled {
+        // Absent is the desired state, so "not found" is success.
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .map_err(|e| AppError::Other(format!("не удалить автозапуск: {e}")))?;
+        }
+        return Ok(());
+    }
+
+    let dir = path
+        .parent()
+        .ok_or_else(|| AppError::Other("не найден каталог LaunchAgents".to_string()))?;
+    std::fs::create_dir_all(dir)
+        .map_err(|e| AppError::Other(format!("не создать каталог LaunchAgents: {e}")))?;
+
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{label}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{exe}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+</dict>
+</plist>
+"#,
+        label = LAUNCH_AGENT_LABEL,
+        exe = xml_escape(exe_path.trim().trim_matches('"')),
+    );
+
+    std::fs::write(&path, plist)
+        .map_err(|e| AppError::Other(format!("не записать автозапуск: {e}")))?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+const LAUNCH_AGENT_LABEL: &str = "com.sakura.screen-translator";
+
+#[cfg(target_os = "macos")]
+fn launch_agent_path() -> Result<std::path::PathBuf, AppError> {
+    let home = dirs::home_dir()
+        .ok_or_else(|| AppError::Other("не найден домашний каталог".to_string()))?;
+    Ok(home
+        .join("Library/LaunchAgents")
+        .join(format!("{LAUNCH_AGENT_LABEL}.plist")))
+}
+
+/// A path can legally contain `&` or `<`, which would otherwise produce a plist
+/// `launchd` refuses to parse.
+#[cfg(target_os = "macos")]
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Linux: an XDG autostart entry. Every desktop environment that implements the
+/// spec — GNOME, KDE, XFCE — starts it at login.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn set_autostart(enabled: bool, exe_path: &str) -> Result<(), AppError> {
+    let dir = dirs::config_dir()
+        .ok_or_else(|| AppError::Other("не найден каталог настроек".to_string()))?
+        .join("autostart");
+    let path = dir.join("sakura-screen-translator.desktop");
+
+    if !enabled {
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .map_err(|e| AppError::Other(format!("не удалить автозапуск: {e}")))?;
+        }
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| AppError::Other(format!("не создать каталог автозапуска: {e}")))?;
+
+    let entry = format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Name=Sakura Screen Translator\n\
+         Exec={exe}\n\
+         Terminal=false\n\
+         X-GNOME-Autostart-enabled=true\n",
+        exe = exe_path.trim().trim_matches('"'),
+    );
+
+    std::fs::write(&path, entry)
+        .map_err(|e| AppError::Other(format!("не записать автозапуск: {e}")))?;
+    Ok(())
 }
 
 pub fn get_current_exe_path() -> String {

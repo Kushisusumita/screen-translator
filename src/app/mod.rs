@@ -89,6 +89,12 @@ impl App {
     ) -> Self {
         cc.egui_ctx.set_fonts(crate::ui::theme::build_fonts());
 
+        // This is a menu-bar app, not a windowed one. Saying so removes the Dock
+        // icon — and, more importantly, the Space the application would
+        // otherwise own and drag the user back to when the overlay opens.
+        #[cfg(target_os = "macos")]
+        crate::features::capture::mac_window::become_menu_bar_agent();
+
         let theme = Theme::resolve(settings.theme);
         theme.apply(&cc.egui_ctx);
 
@@ -377,22 +383,50 @@ impl App {
         let geometry = state.geometry;
         let theme = self.theme;
 
+        let builder = ViewportBuilder::default()
+            .with_position(geometry.window_pos_points())
+            .with_inner_size(geometry.window_size_points())
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_taskbar(false)
+            .with_active(true)
+            .with_always_on_top();
+
+        // The title is never drawn — the window has no chrome — but on macOS it
+        // is how this window is picked out of `NSApp.windows` so it can be
+        // raised over the menu bar and the Dock.
+        //
+        // It is also created *inactive*: letting winit make it key straight away
+        // would activate the application, and an application that has not yet
+        // been told this window belongs on every Space gets pulled back to its
+        // own — taking the user out of the full-screen app they were reading.
+        // `present_overlay` orders it front and takes the keyboard instead.
+        #[cfg(target_os = "macos")]
+        let builder = builder
+            .with_title(crate::features::capture::mac_window::OVERLAY_TITLE)
+            .with_active(false);
+
         ctx.show_viewport_immediate(
             ViewportId::from_hash_of("sakura_capture"),
-            ViewportBuilder::default()
-                .with_position(geometry.window_pos_points())
-                .with_inner_size(geometry.window_size_points())
-                .with_decorations(false)
-                .with_resizable(false)
-                .with_taskbar(false)
-                .with_active(true)
-                .with_always_on_top(),
+            builder,
             |ctx, _| {
                 // Without focus the overlay never sees a key press, and Esc does
-                // nothing however clearly the hint advertises it.
+                // nothing however clearly the hint advertises it. macOS goes
+                // through AppKit instead: winit's focus call activates the
+                // application, which is exactly the Space-switch being avoided.
+                #[cfg(not(target_os = "macos"))]
                 if !ctx.input(|i| i.focused) {
                     ctx.send_viewport_cmd(ViewportCommand::Focus);
                 }
+
+                // Re-applied each frame: the window is created by the frame
+                // before this one, and AppKit resets the frame if a display is
+                // reconfigured mid-capture.
+                #[cfg(target_os = "macos")]
+                crate::features::capture::mac_window::present_overlay(
+                    crate::features::capture::mac_window::OVERLAY_TITLE,
+                );
+
                 crate::features::capture::overlay::render(ctx, &theme, &mut state);
                 if state.cancelled || state.completed.is_some() {
                     ctx.send_viewport_cmd(ViewportCommand::Close);
@@ -511,6 +545,11 @@ impl App {
             ViewportId::from_hash_of("sakura_settings"),
             builder,
             |ctx, _| {
+                // An accessory application does not come forward on its own, so
+                // the settings window would open behind whatever is in front.
+                #[cfg(target_os = "macos")]
+                crate::features::capture::mac_window::activate();
+
                 theme.apply(ctx);
                 out = self.settings_ui.show(
                     ctx,
@@ -783,6 +822,11 @@ fn open_folder(path: &std::path::Path) {
     {
         let _ = std::process::Command::new("open").arg(path).spawn();
     }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        // Part of xdg-utils, present on every desktop install.
+        let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+    }
 }
 
 fn beep() {
@@ -791,6 +835,28 @@ fn beep() {
         use windows::Win32::System::Diagnostics::Debug::MessageBeep;
         use windows::Win32::UI::WindowsAndMessaging::MB_OK;
         let _ = MessageBeep(MB_OK);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // Detached on purpose: the capture should not wait on the sound.
+        let _ = std::process::Command::new("afplay")
+            .arg("/System/Library/Sounds/Tink.aiff")
+            .spawn();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        // canberra-gtk-play ships with most desktops; the terminal bell is the
+        // fallback when it does not.
+        if std::process::Command::new("canberra-gtk-play")
+            .args(["-i", "message"])
+            .spawn()
+            .is_err()
+        {
+            use std::io::Write as _;
+            let mut out = std::io::stdout();
+            let _ = out.write_all(b"\x07");
+            let _ = out.flush();
+        }
     }
 }
 

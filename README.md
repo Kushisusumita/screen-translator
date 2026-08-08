@@ -6,7 +6,7 @@
 
 [![Release](https://github.com/Kushisusumita/screen-translator/actions/workflows/release.yml/badge.svg)](https://github.com/Kushisusumita/screen-translator/actions/workflows/release.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Platform: Windows](https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D4?logo=windows)](https://github.com/Kushisusumita/screen-translator/releases)
+[![Platform: Windows | macOS | Linux](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-555555)](https://github.com/Kushisusumita/screen-translator/releases)
 [![Built with Rust](https://img.shields.io/badge/Built%20with-Rust%201.75%2B-CE422B?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![GitHub stars](https://img.shields.io/github/stars/Kushisusumita/screen-translator?style=flat&color=yellow)](https://github.com/Kushisusumita/screen-translator/stargazers)
 [![GitHub issues](https://img.shields.io/github/issues/Kushisusumita/screen-translator)](https://github.com/Kushisusumita/screen-translator/issues)
@@ -39,16 +39,17 @@ No browser extension. No copy-paste. Works in fullscreen apps and games.
 | **OCR repair** | Line wraps rejoined, hyphenation undone, small text upscaled before recognition |
 | **31 languages** | Source detected automatically, or pinned |
 | **Light and dark** | Follows the system appearance, or force one |
-| **Tokens encrypted at rest** | API keys sealed with Windows DPAPI, never written to the config in the clear |
+| **Tokens encrypted at rest** | API keys sealed with DPAPI (Windows), the Keychain (macOS) or the Secret Service (Linux) — never written to the config in the clear |
 | **Bounded logs** | One file per day, older ones deleted automatically, screen contents never logged |
 | **System tray only** | No taskbar presence, idles at a fraction of the CPU it used to |
-| **Autostart** | Optional Windows startup entry |
+| **Autostart** | Optional: a `Run` key on Windows, a LaunchAgent on macOS, an XDG autostart entry on Linux |
 
 ---
 
 ## Download
 
 Pre-built binaries for Windows x64 are on the [**Releases**](https://github.com/Kushisusumita/screen-translator/releases) page.
+macOS and Linux build from source — see [Building from Source](#building-from-source).
 
 No installer — just run `screen-translator.exe`.
 
@@ -118,14 +119,27 @@ damage.
   records lengths and timings. Turning on *Параметры → Журнал → Записывать
   распознанный текст* changes that, and the setting says so.
 - Translation history lives in memory and is gone when you quit.
-- API keys are sealed with DPAPI, tied to your Windows account.
+- API keys are sealed with the platform's own credential store: DPAPI on
+  Windows, the login Keychain on macOS, the Secret Service on Linux. The
+  ciphertext in the config is useless on another machine or account.
 
 ---
 
 ## Requirements
 
-- Windows 10 or 11 (x64)
+- Windows 10 or 11 (x64), macOS 13+, or a Linux desktop (X11, or Wayland with
+  the screencast portal)
 - Internet connection, unless you point the AI engine at a local model
+
+**macOS** asks for two permissions the first time they are needed, in *System
+Settings → Privacy & Security*:
+
+- **Screen Recording** — without it every capture comes back blank;
+- **Accessibility** — only if a global shortcut refuses to fire.
+
+**Linux** wants a Secret Service (GNOME Keyring, KWallet) for token encryption
+and an appindicator-capable panel for the tray icon. Without either, the app
+still runs: it says so in the settings window and keeps the shortcuts working.
 
 ---
 
@@ -134,7 +148,15 @@ damage.
 ### Prerequisites
 
 - [Rust](https://rustup.rs/) 1.75+ stable toolchain
-- Visual Studio Build Tools with the **MSVC** compiler and Windows SDK
+- **Windows** — Visual Studio Build Tools with the **MSVC** compiler and Windows SDK
+- **macOS** — Xcode command line tools (`xcode-select --install`)
+- **Linux** — the desktop development headers:
+
+```bash
+sudo apt install libgtk-3-dev libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev \
+  libxcb-xfixes0-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev \
+  libayatana-appindicator3-dev
+```
 
 ### Steps
 
@@ -142,10 +164,17 @@ damage.
 cargo build --release
 ```
 
-Binary output: `target/release/screen-translator.exe`
+Binary output: `target/release/screen-translator` (`.exe` on Windows)
 
 ```bash
 cargo test
+```
+
+Capture is checked against the real display by tests that are ignored by
+default, since a CI runner has no screen:
+
+```bash
+cargo test -- --ignored
 ```
 
 ---
@@ -236,14 +265,31 @@ Two further departures, for legibility:
 - the floating result window says `История · N`, not `Журнал · N`. The mockup
   has no log page to collide with; this app does.
 
-### macOS runtime
+### One runtime, three back ends
 
-The interface layer is cross-platform. The runtime layer is not: screen capture,
-global hotkeys, the tray icon, autostart and token sealing are all Win32, behind
-`#[cfg(windows)]` with non-Windows stubs that say what is missing. A macOS build
-needs CoreGraphics capture, `RegisterEventHotKey`, `NSStatusItem`, a LaunchAgent
-plist and Keychain storage. **There is no macOS build today** — the groundwork is
-in place, the platform back ends are not.
+Every platform-facing subsystem has two implementations behind a `cfg`, and the
+dependency lists are split the same way — a Windows build pulls in no macOS or
+Linux crate, and neither pulls in `windows-rs`.
+
+| Subsystem | Windows | macOS and Linux |
+|---|---|---|
+| Screen capture | GDI `BitBlt` | `xcap` — ScreenCaptureKit / CoreGraphics, X11 or the Wayland portal |
+| Window list | `EnumWindows` | `xcap` window enumeration |
+| Global hotkeys | `RegisterHotKey` on a message-loop thread | `global-hotkey` — Carbon hotkeys, `XGrabKey` |
+| Tray icon | `Shell_NotifyIconW` | `tray-icon` — `NSStatusItem`, StatusNotifierItem |
+| Token sealing | DPAPI `CryptProtectData` | one key in the Keychain / Secret Service, ChaCha20-Poly1305 over the config |
+| Autostart | `HKCU\...\Run` | LaunchAgent plist, XDG autostart entry |
+| Speech | System.Speech via PowerShell | `say`, `spd-say` |
+| DPI | per-monitor awareness | scale factor per monitor, applied at the capture boundary |
+| Overlay window | always-on-top is enough | raised to the screen-saver level and given the screens' full frame, since AppKit otherwise clamps it below the menu bar and the Dock |
+
+Two things the Windows build still does alone: the tray icon animates while a
+translation is in flight (elsewhere the tooltip says so instead), and the
+executable carries an embedded icon resource.
+
+Everything above the runtime — the whole interface — is shared, and keeps each
+platform's own dialect: Fluent metrics and `Ctrl+Shift+T` on Windows, Aqua
+metrics and `⌃⇧T` on macOS. Linux borrows the Fluent round with its own fonts.
 
 ---
 
@@ -266,7 +312,7 @@ Contributions, issues, and pull requests are welcome and encouraged.
 There is no formal contributor agreement beyond the MIT license itself. By submitting a PR, you agree that your contribution will be licensed under MIT.
 
 **Good first issues:**
-- macOS platform back ends (see above)
+- A macOS `.app` bundle and a Linux AppImage in the release workflow
 - A translation-history window
 - Text-to-speech on more than the system voice
 - Package a proper Windows installer

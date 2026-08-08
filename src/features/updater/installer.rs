@@ -120,14 +120,29 @@ pub fn cleanup_previous_version() {
     }
 }
 
-/// Confirms the bytes are a Windows executable of a plausible size.
+/// What an executable for this platform starts with. The check used to run on
+/// Windows only, which left every other platform writing whatever came back
+/// over the installed program.
+#[cfg(windows)]
+const EXECUTABLE_MAGICS: &[&[u8]] = &[b"MZ"];
+#[cfg(target_os = "macos")]
+const EXECUTABLE_MAGICS: &[&[u8]] = &[
+    // Mach-O, 64-bit, little-endian — and the universal ("fat") wrapper that a
+    // build for both Apple silicon and Intel produces.
+    &[0xCF, 0xFA, 0xED, 0xFE],
+    &[0xCA, 0xFE, 0xBA, 0xBE],
+];
+#[cfg(all(unix, not(target_os = "macos")))]
+const EXECUTABLE_MAGICS: &[&[u8]] = &[&[0x7F, b'E', b'L', b'F']];
+
+/// Confirms the bytes are an executable for this platform, of a plausible size.
 ///
 /// Without this, any `200` response — a proxy error page, a login redirect —
 /// would be written over the installed program.
 fn validate_payload(bytes: &[u8]) -> Result<(), String> {
     validate_size(bytes.len())?;
-    if cfg!(windows) && !bytes.starts_with(b"MZ") {
-        return Err("скачанный файл не является программой Windows".into());
+    if !EXECUTABLE_MAGICS.iter().any(|m| bytes.starts_with(m)) {
+        return Err("скачанный файл не является программой".into());
     }
     Ok(())
 }
@@ -164,10 +179,12 @@ fn check_writable(dir: &Path) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    /// A payload that looks like an executable for whichever platform the tests
+    /// are running on.
     fn fake_exe(len: usize) -> Vec<u8> {
+        let magic = EXECUTABLE_MAGICS[0];
         let mut v = vec![0u8; len];
-        v[0] = b'M';
-        v[1] = b'Z';
+        v[..magic.len()].copy_from_slice(magic);
         v
     }
 
