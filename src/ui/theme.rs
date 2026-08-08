@@ -506,6 +506,9 @@ pub mod text {
     pub fn body() -> FontId {
         FontId::proportional(12.5)
     }
+    /// Part of the type scale, kept so the ramp stays complete even when no
+    /// screen currently reaches for this step.
+    #[allow(dead_code)]
     pub fn body_strong() -> FontId {
         FontId::proportional(13.5)
     }

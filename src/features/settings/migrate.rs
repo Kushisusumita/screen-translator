@@ -66,8 +66,8 @@ pub fn apply(settings: &mut Settings, legacy: &LegacySettings) -> bool {
     settings.result_view = match legacy.show_translation {
         Some(false) => ResultView::None,
         // Both old modes put the translation on screen near or over the
-        // capture; the popup is the closest thing in the new set, and it is
-        // also what a new user gets.
+        // capture; the popup is the closest thing in the new set to what these
+        // users already had. A fresh install starts on the inline view instead.
         _ if legacy.tooltip_mode.is_some() => ResultView::Popup,
         _ => settings.result_view,
     };

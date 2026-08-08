@@ -20,7 +20,6 @@ use crate::entities::settings::{
 };
 use crate::shared::secret::{sealing_available, Secret};
 use crate::ui::platform::Platform;
-use crate::ui::spin::Spin;
 use crate::ui::theme::{text, ThemeMode};
 use crate::ui::widgets::RowSpec;
 use crate::ui::{icons, widgets, Theme};
@@ -32,18 +31,20 @@ pub enum Section {
     Languages,
     Engine,
     Appearance,
+    History,
     Logs,
     About,
 }
 
 impl Section {
-    fn all() -> [Section; 7] {
+    fn all() -> [Section; 8] {
         [
             Section::General,
             Section::Keys,
             Section::Languages,
             Section::Engine,
             Section::Appearance,
+            Section::History,
             Section::Logs,
             Section::About,
         ]
@@ -62,6 +63,7 @@ impl Section {
             (Section::Engine, Platform::MacOs) => "Движок",
             (Section::Appearance, Platform::Windows) => "Внешний вид",
             (Section::Appearance, Platform::MacOs) => "Вид",
+            (Section::History, _) => "История",
             (Section::Logs, _) => "Журнал",
             (Section::About, _) => "О программе",
         }
@@ -76,6 +78,7 @@ impl Section {
             Section::Languages => "С какого и на какой язык переводить",
             Section::Engine => "Порядок движков и ключи доступа",
             Section::Appearance => "Оформление и способ показа перевода",
+            Section::History => "Последние переводы этого сеанса",
             Section::Logs => "Что и как долго записывается на диск",
             Section::About => "Версия, обновления и ссылки",
         }
@@ -89,6 +92,7 @@ impl Section {
             Section::Languages => "перевод язык исходный целевой",
             Section::Engine => "yandex google deepl ai openai anthropic gemini ключ токен модель",
             Section::Appearance => "тема светлая тёмная popup окно оформление",
+            Section::History => "история переводы последние очистить память",
             Section::Logs => "лог журнал отладка приватность",
             Section::About => "версия обновление лицензия автор донат",
         }
@@ -101,6 +105,7 @@ impl Section {
             Section::Languages => icons::globe,
             Section::Engine => icons::swap,
             Section::Appearance => icons::appearance,
+            Section::History => icons::clock,
             Section::Logs => icons::journal,
             Section::About => icons::sakura,
         }
@@ -114,6 +119,7 @@ impl Section {
             Section::Languages => Color32::from_rgb(0x34, 0xC7, 0x59),
             Section::Engine => Color32::from_rgb(0xAF, 0x52, 0xDE),
             Section::Appearance => Color32::from_rgb(0x1A, 0x1A, 0x1E),
+            Section::History => Color32::from_rgb(0x30, 0xB0, 0xC7),
             Section::Logs => Color32::from_rgb(0xFF, 0x9F, 0x0A),
             Section::About => Color32::from_rgb(0xE8, 0x7C, 0x9E),
         }
@@ -127,6 +133,7 @@ impl Section {
             "languages" | "языки" => Section::Languages,
             "engine" | "движок" => Section::Engine,
             "appearance" | "вид" => Section::Appearance,
+            "history" | "история" => Section::History,
             "logs" | "журнал" => Section::Logs,
             "about" | "о-программе" => Section::About,
             _ => return None,
@@ -152,8 +159,6 @@ pub struct SettingsContext<'a> {
     pub rejected_hotkeys: &'a [HotkeyAction],
     pub log_dir: std::path::PathBuf,
     pub history: &'a History,
-    /// A translation is in flight. The brand mark spins while it is.
-    pub translating: bool,
 }
 
 /// What the app has to act on after the frame.
@@ -179,9 +184,9 @@ pub struct SettingsUi {
     deepl_key: String,
     reveal_keys: bool,
     synced: bool,
-    /// Brand-mark animation state.
-    spin: Spin,
-    brand_last_frame: Option<f32>,
+    /// Which history entry is expanded, if any. A capture is often a whole
+    /// paragraph, and one truncated line is no way to read it back.
+    open_entry: Option<usize>,
 }
 
 impl Default for SettingsUi {
@@ -200,8 +205,7 @@ impl SettingsUi {
             deepl_key: String::new(),
             reveal_keys: false,
             synced: false,
-            spin: Spin::new(),
-            brand_last_frame: None,
+            open_entry: None,
         }
     }
 
@@ -221,19 +225,6 @@ impl SettingsUi {
         self.ai_key.clear();
         self.deepl_key.clear();
         self.synced = false;
-    }
-
-    /// Rotation and scale for the brand mark, advanced by real time so the
-    /// motion is the same whatever the frame rate.
-    fn brand_animation(&mut self, ctx: &egui::Context, translating: bool) -> (f32, f32) {
-        let now = ctx.input(|i| i.time) as f32;
-        let dt = self.brand_last_frame.map_or(0.0, |previous| now - previous);
-        self.brand_last_frame = Some(now);
-
-        if self.spin.advance(dt, translating) {
-            ctx.request_repaint();
-        }
-        (self.spin.turns(), self.spin.scale())
     }
 
     pub fn show(
@@ -260,18 +251,7 @@ impl SettingsUi {
             )
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
-                ui.horizontal(|ui| {
-                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
-                    let (turns, scale) = self.brand_animation(ui.ctx(), info.translating);
-                    icons::sakura_spinning(ui.painter(), rect, theme.sakura, turns, scale);
-                    ui.label(
-                        egui::RichText::new("Sakura")
-                            .font(text::body_strong())
-                            .strong()
-                            .color(theme.text),
-                    );
-                });
-                ui.add_space(10.0);
+                ui.add_space(2.0);
 
                 if theme.metrics.nav_search {
                     widgets::search_field(ui, theme, &mut self.search);
@@ -344,6 +324,7 @@ impl SettingsUi {
                             Section::Languages => self.languages(ui, theme, settings),
                             Section::Engine => self.engine(ui, theme, settings, info, &mut out),
                             Section::Appearance => self.appearance(ui, theme, settings),
+                            Section::History => self.history(ui, theme, settings, info, &mut out),
                             Section::Logs => self.logs(ui, theme, settings, info, &mut out),
                             Section::About => self.about(ui, theme, settings, info, &mut out),
                         }
@@ -361,7 +342,7 @@ impl SettingsUi {
         ui: &mut egui::Ui,
         theme: &Theme,
         s: &mut Settings,
-        info: &SettingsContext<'_>,
+        _info: &SettingsContext<'_>,
         out: &mut SettingsOutput,
     ) {
         let startup_label = if theme.platform == Platform::Windows {
@@ -476,62 +457,6 @@ impl SettingsUi {
                 });
             }
         });
-
-        widgets::section_caption(ui, theme, "История");
-        widgets::list(ui, theme, |ui| {
-            widgets::row(
-                ui,
-                theme,
-                RowSpec::new("Сколько переводов помнить")
-                    .subtitle("Хранится в памяти и не пишется на диск")
-                    .last(),
-                |ui| {
-                    let mut n = s.history_limit as u32;
-                    if ui
-                        .add(egui::DragValue::new(&mut n).range(1..=500).speed(1.0))
-                        .changed()
-                    {
-                        s.history_limit = n as usize;
-                    }
-                },
-            );
-        });
-
-        if !info.history.is_empty() {
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(format!("Последние переводы · {}", info.history.len()))
-                        .font(text::small())
-                        .color(theme.text_dim),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if widgets::ghost_button(ui, theme, "Очистить").clicked() {
-                        out.clear_history = true;
-                    }
-                });
-            });
-            ui.add_space(6.0);
-            widgets::card(ui, theme, |ui| {
-                let shown: Vec<_> = info.history.iter().take(6).collect();
-                let last_index = shown.len().saturating_sub(1);
-                for (i, entry) in shown.iter().enumerate() {
-                    history_row(ui, theme, entry, i == last_index);
-                }
-            });
-            if let Some(latest) = info.history.latest() {
-                hint(
-                    ui,
-                    theme,
-                    &format!(
-                        "Последний перевод выполнил {} ({} → {}).",
-                        latest.engine.label(),
-                        latest.source.badge(),
-                        latest.target.badge()
-                    ),
-                );
-            }
-        }
     }
 
     // ── Сочетания клавиш ─────────────────────────────────────────────────────
@@ -1059,6 +984,112 @@ impl SettingsUi {
         });
     }
 
+    // ── История ─────────────────────────────────────────────────────────────
+
+    fn history(
+        &mut self,
+        ui: &mut egui::Ui,
+        theme: &Theme,
+        s: &mut Settings,
+        info: &SettingsContext<'_>,
+        out: &mut SettingsOutput,
+    ) {
+        widgets::list(ui, theme, |ui| {
+            widgets::row(
+                ui,
+                theme,
+                RowSpec::new("Запоминать переводы")
+                    .subtitle("Только в памяти — на диск не пишется"),
+                |ui| {
+                    widgets::toggle(ui, theme, &mut s.keep_history);
+                },
+            );
+            widgets::row(
+                ui,
+                theme,
+                RowSpec::new("Сколько переводов помнить")
+                    .subtitle("Самые старые вытесняются новыми")
+                    .last(),
+                |ui| {
+                    ui.add_enabled_ui(s.keep_history, |ui| {
+                        let mut n = s.history_limit as u32;
+                        if ui
+                            .add(egui::DragValue::new(&mut n).range(1..=500).speed(1.0))
+                            .changed()
+                        {
+                            s.history_limit = n as usize;
+                        }
+                    });
+                },
+            );
+        });
+
+        if !s.keep_history {
+            hint(
+                ui,
+                theme,
+                "История выключена. Переводы нигде не сохраняются.",
+            );
+            return;
+        }
+
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(format!("Последние переводы · {}", info.history.len()))
+                    .font(text::small())
+                    .color(theme.text_dim),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_enabled_ui(!info.history.is_empty(), |ui| {
+                    if widgets::ghost_button(ui, theme, "Очистить").clicked() {
+                        out.clear_history = true;
+                    }
+                });
+            });
+        });
+        ui.add_space(6.0);
+
+        if info.history.is_empty() {
+            hint(ui, theme, "Пока ничего не переведено в этом сеансе.");
+            return;
+        }
+
+        // The whole list, not the first six: this is the page for it now, and
+        // it scrolls with the rest of the page.
+        let mut toggled = None;
+        widgets::card(ui, theme, |ui| {
+            let total = info.history.len();
+            for (i, entry) in info.history.iter().enumerate() {
+                let open = self.open_entry == Some(i);
+                if history_row(ui, theme, entry, i + 1 == total && !open, open).clicked() {
+                    toggled = Some(i);
+                }
+                if open {
+                    history_detail(ui, theme, entry, i, i + 1 == total);
+                }
+            }
+        });
+        if let Some(i) = toggled {
+            // Clicking the open one closes it, so the list can be collapsed back
+            // without hunting for a control.
+            self.open_entry = if self.open_entry == Some(i) { None } else { Some(i) };
+        }
+
+        if let Some(latest) = info.history.latest() {
+            hint(
+                ui,
+                theme,
+                &format!(
+                    "Последний перевод выполнил {} ({} → {}).",
+                    latest.engine.label(),
+                    latest.source.badge(),
+                    latest.target.badge()
+                ),
+            );
+        }
+    }
+
     // ── Журнал ───────────────────────────────────────────────────────────────
 
     fn logs(
@@ -1261,6 +1292,9 @@ impl SettingsUi {
                 theme,
                 RowSpec::new("Binance Pay")
                     .icon(icons::binance)
+                    // Brand colours: a brand mark in the interface's own grey
+                    // is not recognisable as the brand.
+                    .icon_tint(Color32::from_rgb(0xF0, 0xB9, 0x0B))
                     .subtitle("Перевод по QR-ссылке, без комиссии"),
                 |ui| {
                     if widgets::secondary_button(ui, theme, "Открыть").clicked() {
@@ -1273,6 +1307,7 @@ impl SettingsUi {
                 theme,
                 RowSpec::new("USDT · TRC20")
                     .icon(icons::tether)
+                    .icon_tint(Color32::from_rgb(0x26, 0xA1, 0x7B))
                     .subtitle("Без аккаунта Binance")
                     .last(),
                 |ui| {
@@ -1467,38 +1502,185 @@ fn view_card(
 
 /// One line of the recent-translations list: the original, dimmed, with the
 /// translation under it.
-fn history_row(ui: &mut egui::Ui, theme: &Theme, entry: &HistoryEntry, last: bool) {
-    let height = 42.0;
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
-    let p = ui.painter();
-    p.text(
-        egui::pos2(rect.min.x + 14.0, rect.min.y + 6.0),
-        egui::Align2::LEFT_TOP,
-        crate::shared::logging::clip(entry.original.trim(), 90),
-        text::caption(),
+/// One line of the history list: the original above, the translation below.
+///
+/// Both are laid out to a single row and truncated with an ellipsis. Painting
+/// them as raw text — which this did — puts a multi-line OCR result on screen
+/// as multiple lines inside a 42-point row, so it ran over the row below it,
+/// over the caption, and out of the card.
+///
+/// The row is clickable: a truncated line is enough to *find* a translation and
+/// nowhere near enough to *read* one, so clicking opens the full text below it.
+fn history_row(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    entry: &HistoryEntry,
+    last: bool,
+    open: bool,
+) -> egui::Response {
+    const HEIGHT: f32 = 46.0;
+    const PAD: f32 = 14.0;
+    /// Room for the target-language badge and the chevron on the right.
+    const TRAILING: f32 = 58.0;
+
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), HEIGHT),
+        Sense::click(),
+    );
+    let width = (rect.width() - PAD * 2.0 - TRAILING).max(60.0);
+
+    let original = one_line(ui, &entry.original, text::caption(), theme.text_faint, width);
+    let translated = one_line(ui, &entry.translated, text::small(), theme.text, width);
+
+    let painter = ui.painter();
+    // Inset and rounded rather than a full-bleed rectangle: the card it sits
+    // in has rounded corners of its own, and a highlight running to the edge
+    // squares them off on the first and last row. The open row gets a faint
+    // wash of the brand colour so it stays marked once the pointer leaves.
+    let bg = rect.shrink2(Vec2::new(5.0, 2.0));
+    if open {
+        painter.rect_filled(bg, 7.0, theme.tint(theme.sakura, 20));
+    } else if response.hovered() {
+        painter.rect_filled(bg, 7.0, theme.hover_fill());
+    }
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    painter.galley(
+        egui::pos2(rect.min.x + PAD, rect.min.y + 7.0),
+        original,
         theme.text_faint,
     );
-    p.text(
-        egui::pos2(rect.min.x + 14.0, rect.min.y + 21.0),
-        egui::Align2::LEFT_TOP,
-        crate::shared::logging::clip(entry.translated.trim(), 90),
-        text::small(),
+    painter.galley(
+        egui::pos2(rect.min.x + PAD, rect.min.y + 24.0),
+        translated,
         theme.text,
     );
-    p.text(
-        egui::pos2(rect.max.x - 14.0, rect.center().y),
+    painter.text(
+        egui::pos2(rect.max.x - PAD - 18.0, rect.center().y),
         egui::Align2::RIGHT_CENTER,
         entry.target.badge(),
         text::caption(),
         theme.sakura_deep,
     );
+    // Chevron: down when the entry is open, right when it is not.
+    let cx = rect.max.x - PAD - 4.0;
+    let cy = rect.center().y;
+    let s = egui::Stroke::new(1.4, theme.text_dim);
+    if open {
+        painter.line_segment([egui::pos2(cx - 5.0, cy - 2.0), egui::pos2(cx, cy + 3.0)], s);
+        painter.line_segment([egui::pos2(cx, cy + 3.0), egui::pos2(cx + 5.0, cy - 2.0)], s);
+    } else {
+        painter.line_segment([egui::pos2(cx - 2.0, cy - 5.0), egui::pos2(cx + 3.0, cy)], s);
+        painter.line_segment([egui::pos2(cx + 3.0, cy), egui::pos2(cx - 2.0, cy + 5.0)], s);
+    }
     if !last {
-        p.hline(
-            (rect.min.x + 14.0)..=rect.max.x,
+        painter.hline(
+            (rect.min.x + PAD)..=rect.max.x,
             rect.max.y,
             egui::Stroke::new(1.0, theme.separator),
         );
     }
+    response
+}
+
+/// The expanded entry: the whole original and the whole translation, scrollable,
+/// with a button to put the translation back on the clipboard.
+///
+/// Bounded in height so one long capture cannot push the rest of the list off
+/// the page — inside that box the text scrolls, however much of it there is.
+fn history_detail(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    entry: &HistoryEntry,
+    index: usize,
+    last: bool,
+) {
+    const MAX_HEIGHT: f32 = 220.0;
+
+    egui::Frame::none()
+        .inner_margin(egui::Margin {
+            left: 14.0,
+            right: 14.0,
+            top: 2.0,
+            bottom: 10.0,
+        })
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                // Keyed by position: two captures of the same length would
+                // otherwise share one scroll position.
+                .id_salt(index)
+                .max_height(MAX_HEIGHT)
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(format!("{} · оригинал", entry.source.badge()))
+                            .font(text::caption())
+                            .color(theme.text_faint),
+                    );
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new(entry.original.trim())
+                            .font(text::small())
+                            .color(theme.text_dim),
+                    );
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new(format!("{} · перевод", entry.target.badge()))
+                            .font(text::caption())
+                            .color(theme.sakura_deep),
+                    );
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new(entry.translated.trim())
+                            .font(text::body())
+                            .color(theme.text),
+                    );
+                });
+
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if widgets::secondary_button(ui, theme, "Копировать перевод").clicked() {
+                    ui.output_mut(|o| o.copied_text = entry.translated.clone());
+                }
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} · {} символов",
+                        entry.engine.label(),
+                        entry.translated.chars().count()
+                    ))
+                    .font(text::caption())
+                    .color(theme.text_faint),
+                );
+            });
+        });
+
+    if !last {
+        let y = ui.min_rect().max.y;
+        ui.painter().hline(
+            (ui.min_rect().min.x + 14.0)..=ui.min_rect().max.x,
+            y,
+            egui::Stroke::new(1.0, theme.separator),
+        );
+    }
+}
+
+/// Collapses a captured block of text into one row that fits `width`.
+///
+/// OCR output is full of newlines, and a history row has space for exactly one
+/// line of each half.
+fn one_line(
+    ui: &egui::Ui,
+    text: &str,
+    font: egui::FontId,
+    color: Color32,
+    width: f32,
+) -> std::sync::Arc<egui::Galley> {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut job = egui::text::LayoutJob::simple(flat, font, color, width);
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    job.wrap.overflow_character = Some('…');
+    ui.fonts(|f| f.layout_job(job))
 }
 
 /// Width for an input inside a settings row: as wide as fits, capped so the

@@ -78,6 +78,10 @@ pub fn section_caption(ui: &mut Ui, theme: &Theme, label: &str) {
 #[derive(Default)]
 pub struct RowSpec<'a> {
     pub icon: Option<IconFn>,
+    /// Colour for that icon. Defaults to the dimmed text colour, which is
+    /// right for the interface's own glyphs and wrong for a brand mark: a
+    /// grey Binance logo is not the Binance logo.
+    pub icon_tint: Option<Color32>,
     pub title: &'a str,
     /// One line of explanation. Shown on Windows, where Settings always pairs a
     /// control with one; dropped on macOS, where it does not.
@@ -98,6 +102,11 @@ impl<'a> RowSpec<'a> {
 
     pub fn icon(mut self, icon: IconFn) -> Self {
         self.icon = Some(icon);
+        self
+    }
+
+    pub fn icon_tint(mut self, tint: Color32) -> Self {
+        self.icon_tint = Some(tint);
         self
     }
 
@@ -147,7 +156,11 @@ pub fn row<R>(
             egui::pos2(text_left, bg.center().y - size / 2.0),
             Vec2::splat(size),
         );
-        icon(ui.painter(), icon_rect, theme.text_dim);
+        icon(
+            ui.painter(),
+            icon_rect,
+            spec.icon_tint.unwrap_or(theme.text_dim),
+        );
         text_left = icon_rect.max.x + 12.0;
     }
 

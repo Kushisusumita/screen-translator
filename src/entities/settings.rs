@@ -713,6 +713,10 @@ pub struct Settings {
     /// does not announce itself at every launch.
     #[serde(default)]
     pub notified_version: String,
+    /// Keep a list of recent translations for the session. Off means nothing is
+    /// recorded at all — the list is a record of everything the user pointed the
+    /// tool at, and some people would rather it did not exist even in memory.
+    pub keep_history: bool,
     pub history_limit: usize,
 }
 
@@ -723,7 +727,7 @@ impl Default for Settings {
             target_lang: Language::Ru,
             hotkeys: Hotkeys::default(),
             capture_mode: CaptureMode::Region,
-            result_view: ResultView::Popup,
+            result_view: ResultView::Inline,
             theme: ThemeMode::System,
             engines: EngineSettings::default(),
             logs: LogSettings::default(),
@@ -732,10 +736,11 @@ impl Default for Settings {
             hide_tray_icon: false,
             show_mode_hud: true,
             play_sound: false,
-            pin_result_window: false,
+            pin_result_window: true,
             close_result_on_focus_loss: true,
             notify_about_updates: true,
             notified_version: String::new(),
+            keep_history: true,
             history_limit: 50,
         }
     }
@@ -756,7 +761,10 @@ mod tests {
     fn an_empty_config_file_loads_as_defaults() {
         let s: Settings = toml::from_str("").expect("empty config must parse");
         assert_eq!(s.target_lang, Language::Ru);
-        assert_eq!(s.result_view, ResultView::Popup);
+        // The translation lands over the text it came from, and stays in front
+        // until dismissed — both are what a fresh install now does.
+        assert_eq!(s.result_view, ResultView::Inline);
+        assert!(s.pin_result_window);
     }
 
     #[test]

@@ -182,9 +182,15 @@ pub fn keyboard(p: &Painter, rect: Rect, color: Color32) {
 }
 
 /// The Binance mark: four diamonds around a fifth.
+/// The Binance mark: four diamonds around a larger fifth.
+///
+/// Proportions follow the official logo — the outer four sit at a quarter of
+/// the width from the centre and are two thirds the size of the middle one,
+/// with a visible gap between all five. Getting those ratios wrong is what
+/// makes a redrawn logo read as "some diamonds" rather than as Binance.
 pub fn binance(p: &Painter, rect: Rect, color: Color32) {
     let c = rect.center();
-    let unit = rect.width().min(rect.height()) * 0.5;
+    let unit = rect.width().min(rect.height());
     let diamond = |offset: Vec2, half: f32| {
         let centre = c + offset;
         Shape::convex_polygon(
@@ -198,30 +204,62 @@ pub fn binance(p: &Painter, rect: Rect, color: Color32) {
             Stroke::NONE,
         )
     };
-    let step = unit * 0.56;
-    let small = unit * 0.26;
-    p.add(diamond(Vec2::new(0.0, -step), small));
-    p.add(diamond(Vec2::new(0.0, step), small));
-    p.add(diamond(Vec2::new(-step, 0.0), small));
-    p.add(diamond(Vec2::new(step, 0.0), small));
-    p.add(diamond(Vec2::ZERO, unit * 0.34));
+
+    let step = unit * 0.29;
+    let outer = unit * 0.15;
+    let inner = unit * 0.22;
+    p.add(diamond(Vec2::new(0.0, -step), outer));
+    p.add(diamond(Vec2::new(0.0, step), outer));
+    p.add(diamond(Vec2::new(-step, 0.0), outer));
+    p.add(diamond(Vec2::new(step, 0.0), outer));
+    p.add(diamond(Vec2::ZERO, inner));
 }
 
-/// The Tether mark: a ₮ on a disc.
+/// The Tether mark: a filled disc with a ₮ knocked out of it.
+///
+/// The previous drawing had an ellipse across the stem, which belongs to no
+/// version of the logo. The real one is a plain ₮: a wide bar, a narrower one
+/// under it, and a stem down the middle.
 pub fn tether(p: &Painter, rect: Rect, color: Color32) {
-    let s = stroke_for(rect, color);
     let c = rect.center();
-    let r = rect.width().min(rect.height()) * 0.42;
-    p.circle_stroke(c, r, s);
-    // The bar and stem of ₮, plus the ellipse the logo puts across the stem.
-    line(p, rect, (0.30, 0.34), (0.70, 0.34), s);
-    line(p, rect, (0.50, 0.34), (0.50, 0.74), s);
-    let mut pts = Vec::with_capacity(25);
-    for i in 0..=24 {
-        let a = TAU * (i as f32) / 24.0;
-        pts.push(c + Vec2::new(a.cos() * r * 0.52, a.sin() * r * 0.20));
-    }
-    p.add(Shape::line(pts, s));
+    let r = rect.width().min(rect.height()) * 0.46;
+    p.circle_filled(c, r, color);
+
+    // The glyph is cut out of the disc, so it is drawn in the background
+    // colour. Tether's own logo is white on green; against a dark settings
+    // page a light glyph reads the same way.
+    let cut = Color32::from_rgb(0xF7, 0xF8, 0xFA);
+    let bar_w = r * 1.12;
+    let bar_h = r * 0.20;
+    let top = c.y - r * 0.52;
+
+    // Upper bar, full width.
+    p.rect_filled(
+        Rect::from_min_size(
+            egui::pos2(c.x - bar_w / 2.0, top),
+            Vec2::new(bar_w, bar_h),
+        ),
+        0.0,
+        cut,
+    );
+    // Lower bar, shorter — the second stroke of ₮.
+    p.rect_filled(
+        Rect::from_min_size(
+            egui::pos2(c.x - bar_w * 0.34, top + bar_h * 1.9),
+            Vec2::new(bar_w * 0.68, bar_h * 0.8),
+        ),
+        0.0,
+        cut,
+    );
+    // Stem.
+    p.rect_filled(
+        Rect::from_min_size(
+            egui::pos2(c.x - bar_h * 0.55, top),
+            Vec2::new(bar_h * 1.1, r * 1.30),
+        ),
+        0.0,
+        cut,
+    );
 }
 
 /// Rocket — "launch at startup".
@@ -273,6 +311,18 @@ pub fn journal(p: &Painter, rect: Rect, color: Color32) {
     for y in [0.34_f32, 0.50, 0.66] {
         line(p, rect, (0.32, y), (0.68, y), s);
     }
+}
+
+/// A clock face with its hands at ten past ten — the history page's mark.
+pub fn clock(p: &Painter, rect: Rect, color: Color32) {
+    let s = stroke_for(rect, color);
+    let c = rect.center();
+    let r = rect.width() * 0.36;
+    p.circle_stroke(c, r, s);
+    // Hour hand up and slightly left, minute hand to the right: a clock reads as
+    // a clock only when the hands are not on top of each other.
+    p.line_segment([c, c + Vec2::new(0.0, -r * 0.52)], s);
+    p.line_segment([c, c + Vec2::new(r * 0.62, r * 0.12)], s);
 }
 
 pub fn globe(p: &Painter, rect: Rect, color: Color32) {
