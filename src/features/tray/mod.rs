@@ -74,6 +74,25 @@ impl TrayManager {
         self.control.set_busy(busy);
     }
 
+    /// Advances that animation by one frame, and says whether more are
+    /// wanted.
+    ///
+    /// Windows drives its own from a `WM_TIMER` on the tray thread and has
+    /// nothing to do here. The portable back ends cannot: `NSStatusItem` is
+    /// main-thread only, so their frames have to come from the caller — which
+    /// is the UI thread, and which uses the return value to keep asking for
+    /// repaints while the flower is still turning.
+    pub fn tick(&self) -> bool {
+        #[cfg(windows)]
+        {
+            false
+        }
+        #[cfg(not(windows))]
+        {
+            self.control.tick()
+        }
+    }
+
     /// Adds or removes the icon without restarting the thread. The hotkeys keep
     /// working either way.
     pub fn set_visible(&self, visible: bool) {
@@ -115,16 +134,36 @@ pub fn app_icon(size: u32) -> egui::IconData {
 mod portable {
     use super::*;
 
+    use std::cell::{Cell, RefCell};
     use std::sync::mpsc::Sender;
+    use std::time::Instant;
 
     use tracing::warn;
     use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
     use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
     use crate::entities::settings::Hotkey;
+    use crate::ui::spin::Spin;
 
     const TOOLTIP_IDLE: &str = "Sakura Screen Translator";
     const TOOLTIP_BUSY: &str = "Sakura Screen Translator — перевод…";
+
+    /// Size of the rasterised mark. Both platforms scale it down themselves;
+    /// 32 px is enough for a menu bar at 2× and cheap enough to redraw at
+    /// animation rate.
+    const ICON_SIZE: u32 = 32;
+
+    /// How often a new frame is pushed to the shell.
+    ///
+    /// macOS just swaps an `NSImage`, so it matches the Windows build's ~16 fps.
+    /// Linux is a different cost entirely: `tray-icon` writes each frame to a
+    /// PNG in the temp directory and re-points the indicator's icon theme at it,
+    /// so the same rate would mean sixteen files a second. Slower there — still
+    /// clearly a turning flower, a fraction of the churn.
+    #[cfg(target_os = "macos")]
+    const FRAME_INTERVAL: f32 = 0.06;
+    #[cfg(not(target_os = "macos"))]
+    const FRAME_INTERVAL: f32 = 0.15;
 
     pub struct Control {
         /// `None` when the desktop has no tray at all — a bare window manager,
@@ -132,6 +171,14 @@ mod portable {
         tray: Option<TrayIcon>,
         /// Held so the labels can be rewritten when a shortcut changes.
         items: Option<Items>,
+        /// The turning-flower animation. `Cell`/`RefCell` rather than a lock:
+        /// everything here is on the UI thread, which is the only thread AppKit
+        /// would let touch a status item anyway.
+        spin: RefCell<Spin>,
+        busy: Cell<bool>,
+        /// When the last frame went out, so a 60 fps UI does not redraw the
+        /// icon sixty times a second.
+        last_frame: Cell<Option<Instant>>,
     }
 
     struct Items {
@@ -160,13 +207,61 @@ mod portable {
             ));
         }
 
-        /// Neither platform animates a status item the way the Windows build
-        /// spins its icon — macOS in particular redraws the menu bar from the
-        /// main thread only — so the state is said in the tooltip instead.
+        /// Records the state. The frames themselves come from [`tick`], because
+        /// this is called once per change while an animation needs one call per
+        /// frame.
+        ///
+        /// The tooltip is set as well, and is the whole indication on Windows'
+        /// counterpart — but note it is a no-op on Linux, where `tray-icon` has
+        /// no tooltip to set. That is precisely why the icon has to animate
+        /// there rather than merely describe itself.
         pub fn set_busy(&self, busy: bool) {
+            self.busy.set(busy);
             if let Some(tray) = self.tray.as_ref() {
                 let _ = tray.set_tooltip(Some(if busy { TOOLTIP_BUSY } else { TOOLTIP_IDLE }));
             }
+        }
+
+        /// Pushes one frame if enough time has passed, and reports whether the
+        /// mark is still moving.
+        ///
+        /// Returning `true` while at rest would keep the UI awake forever; the
+        /// early exit below is what lets an idle tray app stay idle.
+        pub fn tick(&self) -> bool {
+            let at_rest = self.spin.borrow().is_at_rest();
+            if at_rest && !self.busy.get() {
+                return false;
+            }
+
+            let now = Instant::now();
+            let elapsed = self
+                .last_frame
+                .get()
+                .map_or(FRAME_INTERVAL, |t| now.duration_since(t).as_secs_f32());
+            if elapsed < FRAME_INTERVAL {
+                // Too soon for a new frame, but the animation is still running,
+                // so the caller should come back.
+                return true;
+            }
+            self.last_frame.set(Some(now));
+
+            let (turns, scale, moving) = {
+                let mut spin = self.spin.borrow_mut();
+                let moving = spin.advance(elapsed, self.busy.get());
+                (spin.turns(), spin.scale(), moving)
+            };
+
+            // The frame is drawn even on the final tick: that one is the mark
+            // back at rest, and skipping it would leave the icon mid-turn.
+            if let Some(tray) = self.tray.as_ref() {
+                if let Some(icon) = frame_icon(turns, scale) {
+                    if let Err(e) = tray.set_icon(Some(icon)) {
+                        warn!(error = %e, "Could not update the tray icon");
+                    }
+                }
+            }
+
+            moving
         }
 
         pub fn set_visible(&self, visible: bool) {
@@ -267,6 +362,9 @@ mod portable {
                 fullscreen,
                 _menu: menu,
             }),
+            spin: RefCell::new(Spin::new()),
+            busy: Cell::new(false),
+            last_frame: Cell::new(None),
         };
 
         // As with the hotkeys: the app only reads its channels during a frame,
@@ -316,8 +414,13 @@ mod portable {
     /// The same brand mark the window and the taskbar use, at a size the menu
     /// bar can downscale cleanly.
     fn tray_icon_image() -> Option<Icon> {
-        const SIZE: u32 = 32;
-        match Icon::from_rgba(crate::shared::mark::rasterise(SIZE), SIZE, SIZE) {
+        frame_icon(0.0, 1.0)
+    }
+
+    /// One frame of the mark: turned by `turns`, breathing at `scale`.
+    fn frame_icon(turns: f32, scale: f32) -> Option<Icon> {
+        let rgba = crate::shared::mark::rasterise_with(ICON_SIZE, turns, scale);
+        match Icon::from_rgba(rgba, ICON_SIZE, ICON_SIZE) {
             Ok(icon) => Some(icon),
             Err(e) => {
                 warn!(error = %e, "Could not rasterise the tray icon");

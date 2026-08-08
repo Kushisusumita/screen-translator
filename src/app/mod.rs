@@ -749,11 +749,18 @@ impl App {
 
     /// Tells the tray to spin its icon while work is in flight. Sent only on a
     /// change; the tray runs the animation itself from there.
-    fn sync_tray_activity(&mut self) {
+    fn sync_tray_activity(&mut self, ctx: &Context) {
         let busy = self.is_translating();
         if busy != self.tray_busy {
             self.tray_busy = busy;
             self.tray.set_busy(busy);
+        }
+
+        // macOS and Linux have no tray thread of their own to run the spin on —
+        // a status item may only be touched from this thread — so the frames
+        // come from here, and keep coming until the mark has settled.
+        if self.tray.tick() {
+            ctx.request_repaint_after(Duration::from_millis(50));
         }
     }
 
@@ -782,7 +789,7 @@ impl eframe::App for App {
         self.drain_events(ctx);
         self.collect_pipeline_result();
         self.poll_ai_test();
-        self.sync_tray_activity();
+        self.sync_tray_activity(ctx);
         self.announce_update();
 
         if self.overlay.is_some() {
