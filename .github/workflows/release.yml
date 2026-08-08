@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    branches: [main, master]
+    branches: [main]
 
 permissions:
   contents: write
@@ -10,6 +10,10 @@ permissions:
 jobs:
   release:
     runs-on: windows-latest
+    # Belt and braces: the trigger above already limits this to main, and this
+    # keeps it that way if a tag, a schedule or workflow_dispatch is ever added.
+    # A release cut from a feature branch would tag and publish unreviewed work.
+    if: github.ref == 'refs/heads/main'
 
     steps:
       - uses: actions/checkout@v4
