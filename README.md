@@ -13,13 +13,11 @@
 [![Built with Rust](https://img.shields.io/badge/Built%20with-Rust%201.75%2B-CE422B?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![GitHub stars](https://img.shields.io/github/stars/Kushisusumita/screen-translator?style=flat&color=yellow)](https://github.com/Kushisusumita/screen-translator/stargazers)
 [![GitHub issues](https://img.shields.io/github/issues/Kushisusumita/screen-translator)](https://github.com/Kushisusumita/screen-translator/issues)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
 [**⚡ Quick start**](#-quick-start) ·
 [**🎛️ Usage**](#-usage) ·
 [**📋 Requirements**](#-requirements) ·
 [**🛠️ Build**](#-building-from-source) ·
-[**🤝 Contributing**](#-contributing) ·
 [**📄 License**](#-license)
 
 </div>
@@ -180,36 +178,6 @@ cargo test -- --ignored # capture checked against the real screen
 
 > 🤖 CI builds and tests on **Windows, macOS and Linux** on every push, so the
 > platform split cannot quietly rot. Releases are cut from `main` only.
-
----
-
-## 🤝 Contributing
-
-Contributions, issues, and pull requests are welcome and encouraged.
-
-**To contribute:**
-
-1. 🍴 Fork the repository
-2. 🌿 Create a feature branch: `git checkout -b feat/my-improvement`
-3. 📝 Commit using [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix:`, `docs:`, etc.
-4. 🚀 Open a pull request with a clear description of what and why
-
-**You are explicitly allowed to:**
-
-- Fork this project and modify it for any purpose, including commercial use (per MIT License)
-- Submit PRs with new languages, translation backends, UI improvements, bug fixes, or platform support
-- Redistribute modified versions as long as the original MIT license and copyright notice are retained
-
-There is no formal contributor agreement beyond the MIT license itself. By
-submitting a PR, you agree that your contribution will be licensed under MIT.
-
-**🌱 Good first issues:**
-
-- 📦 A macOS `.app` bundle and a Linux AppImage in the release workflow
-- 🕘 A translation-history window
-- 🗣️ Text-to-speech beyond the system voice
-- 🪟 A proper Windows installer
-- 🖥️ Panel geometry on Wayland, so the result popup avoids the dock there too
 
 ---
 
