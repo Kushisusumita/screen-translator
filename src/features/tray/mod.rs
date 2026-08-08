@@ -247,7 +247,20 @@ mod portable {
 
             let (turns, scale, moving) = {
                 let mut spin = self.spin.borrow_mut();
-                let moving = spin.advance(elapsed, self.busy.get());
+                // Advanced in steps no larger than the clamp inside `Spin`,
+                // which exists to absorb one stalled frame. On Linux a normal
+                // frame is 150ms and would hit that clamp every time, turning a
+                // safety net into a permanent third off the rotation speed —
+                // the tray mark would visibly lag the identical one spinning in
+                // the settings window. The outer cap keeps the stall guard.
+                const MAX_STEP: f32 = 0.1;
+                let mut remaining = elapsed.min(0.5);
+                let mut moving = false;
+                while remaining > 0.0 {
+                    let step = remaining.min(MAX_STEP);
+                    moving = spin.advance(step, self.busy.get());
+                    remaining -= step;
+                }
                 (spin.turns(), spin.scale(), moving)
             };
 
