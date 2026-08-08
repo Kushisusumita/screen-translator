@@ -60,7 +60,11 @@ pub struct ResultUi {
     /// a constant left a gap under short results and cut the buttons off long
     /// ones, because the guess had to be wrong in one direction or the other.
     popup_chrome: Option<f32>,
-    popup_body: Option<f32>,
+    /// The height the window should be: what the frame actually drew when the
+    /// text fits, the ceiling when it does not and the body has to scroll.
+    popup_wanted: Option<f32>,
+    /// Whether the body is currently in its scrolling mode.
+    popup_scrolls: Option<bool>,
     /// Identifies the content the measurements above belong to, so a result
     /// arriving does not inherit the size of the spinner that preceded it.
     popup_measured_for: u64,
@@ -96,7 +100,8 @@ impl ResultUi {
             close_on_focus_loss: true,
             had_focus: false,
             popup_chrome: None,
-            popup_body: None,
+            popup_wanted: None,
+            popup_scrolls: None,
             popup_measured_for: 0,
         }
     }
@@ -168,7 +173,8 @@ impl ResultUi {
         if self.popup_measured_for != key {
             self.popup_measured_for = key;
             self.popup_chrome = None;
-            self.popup_body = None;
+            self.popup_wanted = None;
+            self.popup_scrolls = None;
         }
 
         let height = self.popup_height(ctx);
@@ -191,7 +197,14 @@ impl ResultUi {
 
         // How much room the body is allowed this frame, from what the chrome
         // actually measured last frame.
-        let body_max = (height - self.popup_chrome.unwrap_or(POPUP_CHROME)).max(48.0);
+        let chrome = self.popup_chrome.unwrap_or(POPUP_CHROME);
+        let body_max = (height - chrome).max(48.0);
+        // Whether the text needs a scroll area at all. Measured once it has been
+        // drawn; until then, estimated from the text itself, so a long result
+        // does not spend its first frame clipped.
+        let scrolls = self
+            .popup_scrolls
+            .unwrap_or_else(|| self.estimated_body(ctx) > (self.max_popup_height() - chrome));
         let mut measured_body: Option<f32> = None;
         let mut shown_body: Option<f32> = None;
         let mut measured_total: Option<f32> = None;
@@ -216,38 +229,57 @@ impl ResultUi {
                                 }
                                 Stage::Done(r) => {
                                     ui.add_space(6.0);
-                                    // One scroll area over both halves, not just
-                                    // the translation: whatever the text does,
-                                    // the body is bounded and the buttons below
-                                    // it stay reachable.
-                                    let out = padded(ui, |ui| {
-                                        egui::ScrollArea::vertical()
-                                            .max_height(body_max)
-                                            .auto_shrink([false, true])
+
+                                    // Two modes, because a scroll area always
+                                    // takes the height it is offered — it never
+                                    // shrinks to its text — so wrapping a short
+                                    // result in one leaves a gap between the
+                                    // text and the buttons that no window size
+                                    // can absorb. Short text is drawn plainly
+                                    // and the window is sized to it; only text
+                                    // that genuinely overflows gets a scroll
+                                    // area, at the ceiling height.
+                                    //
+                                    // `body_frame` rather than `padded`: the
+                                    // latter lays out a horizontal row, and a
+                                    // scroll area inside one reads the row's
+                                    // height — 24 points — as all the space it
+                                    // has.
+                                    let text = |ui: &mut egui::Ui| {
+                                        ui.label(
+                                            egui::RichText::new(
+                                                crate::shared::logging::clip(&r.original, 400),
+                                            )
+                                            .font(text::small())
+                                            .color(theme.text_dim),
+                                        );
+                                        ui.add_space(6.0);
+                                        ui.label(
+                                            egui::RichText::new(&r.translated)
+                                                .font(text::translation())
+                                                .color(theme.text),
+                                        );
+                                    };
+
+                                    if scrolls {
+                                        let out = body_frame()
                                             .show(ui, |ui| {
-                                                ui.label(
-                                                    egui::RichText::new(
-                                                        crate::shared::logging::clip(
-                                                            &r.original,
-                                                            400,
-                                                        ),
-                                                    )
-                                                    .font(text::small())
-                                                    .color(theme.text_dim),
-                                                );
-                                                ui.add_space(6.0);
-                                                ui.label(
-                                                    egui::RichText::new(&r.translated)
-                                                        .font(text::translation())
-                                                        .color(theme.text),
-                                                );
+                                                egui::ScrollArea::vertical()
+                                                    .max_height(body_max)
+                                                    .auto_shrink([false, false])
+                                                    .show(ui, text)
                                             })
-                                    });
-                                    // What the body wanted, and what it was
-                                    // given: the difference between the two is
-                                    // whether a scrollbar is needed at all.
-                                    measured_body = Some(out.content_size.y);
-                                    shown_body = Some(out.inner_rect.height());
+                                            .inner;
+                                        shown_body = Some(out.inner_rect.height());
+                                        measured_body = Some(out.content_size.y);
+                                    } else {
+                                        let drawn = body_frame().show(ui, text).response.rect;
+                                        // Nothing is clipped in this mode, so
+                                        // what was wanted and what was shown are
+                                        // the same number.
+                                        shown_body = Some(drawn.height());
+                                        measured_body = Some(drawn.height());
+                                    }
                                 }
                             }
 
@@ -339,19 +371,37 @@ impl ResultUi {
             },
         );
 
-        // Everything that is not the body: header, separator, buttons, spacing.
-        // Taken from what was drawn rather than assumed, so the window is
-        // exactly as tall as its contents until it hits the ceiling.
-        if let (Some(total), Some(shown)) = (measured_total, shown_body) {
-            let chrome = (total - shown).max(0.0);
-            if self.popup_chrome.is_none_or(|c| (c - chrome).abs() > 0.5) {
-                self.popup_chrome = Some(chrome);
+        // Sized from what was drawn, not from what was predicted. When the text
+        // fits, the frame's own height *is* the answer — measuring the pieces
+        // and adding them back up reintroduces the rounding the old guess
+        // suffered from. When it does not fit, the window goes to the ceiling
+        // and the body scrolls inside it.
+        if let (Some(total), Some(shown), Some(content)) =
+            (measured_total, shown_body, measured_body)
+        {
+            // In plain mode `content` is what was drawn, so this asks whether
+            // that would have fitted; in scrolling mode it asks whether it
+            // still overflows.
+            let allowance = self.max_popup_height() - (total - shown).max(0.0);
+            let scrolling = content > allowance + 0.5;
+            let wanted = if scrolling {
+                self.max_popup_height()
+            } else {
+                total
+            };
+            if self.popup_scrolls != Some(scrolling) {
+                self.popup_scrolls = Some(scrolling);
                 ctx.request_repaint();
             }
-        }
-        if let Some(body) = measured_body {
-            if self.popup_body.is_none_or(|b| (b - body).abs() > 0.5) {
-                self.popup_body = Some(body);
+            // Everything that is not the body: header, separator, buttons,
+            // spacing. This is what the body's allowance is measured against.
+            let chrome = (total - shown).max(0.0);
+
+            if self.popup_wanted.is_none_or(|w| (w - wanted).abs() > 0.5)
+                || self.popup_chrome.is_none_or(|c| (c - chrome).abs() > 0.5)
+            {
+                self.popup_wanted = Some(wanted);
+                self.popup_chrome = Some(chrome);
                 ctx.request_repaint();
             }
         }
@@ -385,12 +435,21 @@ impl ResultUi {
         let ceiling = self.max_popup_height();
         let floor = 120.0_f32.min(ceiling);
 
-        if let (Some(chrome), Some(body)) = (self.popup_chrome, self.popup_body) {
-            return (chrome + body).clamp(floor, ceiling);
+        if let Some(wanted) = self.popup_wanted {
+            return wanted.clamp(floor, ceiling);
         }
 
+        if matches!(self.stage, Stage::Done(_)) {
+            (POPUP_CHROME + self.estimated_body(ctx)).clamp(floor, ceiling)
+        } else {
+            150.0_f32.clamp(floor, ceiling)
+        }
+    }
+
+    /// Rough height of the text, for the frame before anything has been drawn.
+    fn estimated_body(&self, ctx: &egui::Context) -> f32 {
         let Stage::Done(r) = &self.stage else {
-            return 150.0_f32.clamp(floor, ceiling);
+            return 0.0;
         };
         let width = POPUP_WIDTH - 28.0;
         let measure = |s: &str, font: egui::FontId| {
@@ -405,9 +464,7 @@ impl ResultUi {
                 .y
             })
         };
-        let original = measure(&r.original, text::small());
-        let translated = measure(&r.translated, text::translation());
-        (POPUP_CHROME + original + translated).clamp(floor, ceiling)
+        measure(&r.original, text::small()) + measure(&r.translated, text::translation())
     }
 
     /// What is left of the work area once the popup keeps a margin from both
@@ -948,6 +1005,16 @@ fn transparent_panel(ctx: &egui::Context, theme: &Theme, add: impl FnOnce(&mut e
     egui::CentralPanel::default()
         .frame(egui::Frame::none())
         .show(ctx, add);
+}
+
+/// The same horizontal inset `padded` gives a row, but as a margin rather than
+/// a layout.
+///
+/// Anything that asks the `Ui` how much room it has — a scroll area, most
+/// obviously — has to go in here instead: inside a horizontal row the answer is
+/// the height of the row, not the height of the window.
+fn body_frame() -> egui::Frame {
+    egui::Frame::none().inner_margin(egui::Margin::symmetric(14.0, 0.0))
 }
 
 fn padded<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
