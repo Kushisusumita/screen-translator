@@ -11,8 +11,6 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform: Windows | macOS | Linux](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-555555)](https://github.com/Kushisusumita/screen-translator/releases)
 [![Built with Rust](https://img.shields.io/badge/Built%20with-Rust%201.75%2B-CE422B?logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![GitHub stars](https://img.shields.io/github/stars/Kushisusumita/screen-translator?style=flat&color=yellow)](https://github.com/Kushisusumita/screen-translator/stargazers)
-[![GitHub issues](https://img.shields.io/github/issues/Kushisusumita/screen-translator)](https://github.com/Kushisusumita/screen-translator/issues)
 
 [**⚡ Quick start**](#-quick-start) ·
 [**🎛️ Usage**](#-usage) ·
