@@ -32,6 +32,10 @@ use tracing::info;
 /// window apart from the settings and result windows.
 pub const OVERLAY_TITLE: &str = "Sakura capture overlay";
 
+/// The "translation over the original" view covers the desktop in exactly the
+/// same way, so it needs exactly the same treatment.
+pub const INLINE_TITLE: &str = "Sakura translation overlay";
+
 /// Shown on every Space, and left alone by Mission Control.
 const FOLLOWS_THE_USER: NSWindowCollectionBehavior =
     NSWindowCollectionBehavior::CanJoinAllSpaces.union(NSWindowCollectionBehavior::Stationary);
@@ -151,30 +155,54 @@ fn raise(window: &NSWindow, desktop: NSRect) {
     }
 }
 
+/// The area a normal window may occupy, in the app's own coordinates: logical
+/// points, origin at the top-left of the desktop.
+///
+/// This is `visibleFrame` — the screen minus the menu bar and the Dock — which
+/// is where a result popup belongs. The overlay deliberately ignores it; a
+/// popup that does the same ends up half under the Dock.
+pub fn work_area_points() -> Option<(f64, f64, f64, f64)> {
+    let mtm = MainThreadMarker::new()?;
+    let full = union_of_screens(mtm)?;
+    let visible = union_of_visible_frames(mtm)?;
+
+    // AppKit's Y grows upwards from the bottom of the primary screen; the app
+    // counts downwards from the top of the desktop.
+    let top = (full.origin.y + full.size.height) - (visible.origin.y + visible.size.height);
+    Some((
+        visible.origin.x - full.origin.x,
+        top,
+        visible.size.width,
+        visible.size.height,
+    ))
+}
+
+fn union_of_visible_frames(mtm: MainThreadMarker) -> Option<NSRect> {
+    union(NSScreen::screens(mtm).iter().map(|s| s.visibleFrame()))
+}
+
 /// Every screen's frame — not `visibleFrame`, which is the whole point — as one
 /// rectangle, in AppKit's bottom-left origin coordinates.
 fn union_of_screens(mtm: MainThreadMarker) -> Option<NSRect> {
-    let screens = NSScreen::screens(mtm);
-    let mut union: Option<NSRect> = None;
+    union(NSScreen::screens(mtm).iter().map(|s| s.frame()))
+}
 
-    for screen in screens.iter() {
-        let frame = screen.frame();
-        union = Some(match union {
-            None => frame,
+fn union(rects: impl Iterator<Item = NSRect>) -> Option<NSRect> {
+    rects.fold(None, |acc, r| {
+        Some(match acc {
+            None => r,
             Some(u) => {
-                let min_x = u.origin.x.min(frame.origin.x);
-                let min_y = u.origin.y.min(frame.origin.y);
-                let max_x = (u.origin.x + u.size.width).max(frame.origin.x + frame.size.width);
-                let max_y = (u.origin.y + u.size.height).max(frame.origin.y + frame.size.height);
+                let min_x = u.origin.x.min(r.origin.x);
+                let min_y = u.origin.y.min(r.origin.y);
+                let max_x = (u.origin.x + u.size.width).max(r.origin.x + r.size.width);
+                let max_y = (u.origin.y + u.size.height).max(r.origin.y + r.size.height);
                 NSRect::new(
                     NSPoint::new(min_x, min_y),
                     NSSize::new(max_x - min_x, max_y - min_y),
                 )
             }
-        });
-    }
-
-    union
+        })
+    })
 }
 
 /// AppKit hands back floats it computed itself, so an exact comparison would

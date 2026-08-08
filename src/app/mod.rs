@@ -32,6 +32,7 @@ use crate::features::updater::{check_for_update, download_and_apply, UpdateInfo}
 use crate::shared::logging;
 use crate::shared::utils::autostart::{get_current_exe_path, set_autostart};
 use crate::shared::utils::clipboard::copy_text_to_clipboard;
+use crate::shared::utils::notify;
 use crate::shared::utils::tts;
 use crate::ui::{theme::Theme, widgets};
 
@@ -452,6 +453,9 @@ impl App {
             return;
         };
         let theme = self.theme;
+        // Re-read every frame: toggling the setting should take effect on the
+        // result already on screen, not on the next one.
+        ui.close_on_focus_loss = self.settings.close_result_on_focus_loss;
         ui.render(ctx, &theme, self.history.len());
 
         let mut close = false;
@@ -484,6 +488,40 @@ impl App {
         if !close {
             self.result = Some(ui);
         }
+    }
+
+    /// Tells the user a new release exists, once per release.
+    ///
+    /// The app has no window of its own most of the time, so the only place a
+    /// notice would otherwise appear is a settings page nobody has open. The
+    /// version is remembered so the same release does not announce itself at
+    /// every launch — turning the setting off and on again does not replay it
+    /// either, which is the behaviour a user would expect from "notify me".
+    fn announce_update(&mut self) {
+        if !self.settings.notify_about_updates {
+            return;
+        }
+
+        let available = {
+            let state = self.update.lock().unwrap_or_else(|e| e.into_inner());
+            match &*state {
+                UpdateState::Available(info) => Some(info.version.clone()),
+                _ => None,
+            }
+        };
+        let Some(version) = available else { return };
+
+        if self.settings.notified_version == version {
+            return;
+        }
+        self.settings.notified_version.clone_from(&version);
+        self.settings_dirty = true;
+
+        info!(%version, "Notifying about a new release");
+        notify::show(
+            "Sakura Screen Translator",
+            &format!("Доступна версия {version}. Установить можно в «Параметры → О программе»."),
+        );
     }
 
     fn show_settings(&mut self, ctx: &Context) {
@@ -745,6 +783,7 @@ impl eframe::App for App {
         self.collect_pipeline_result();
         self.poll_ai_test();
         self.sync_tray_activity();
+        self.announce_update();
 
         if self.overlay.is_some() {
             self.show_overlay(ctx);

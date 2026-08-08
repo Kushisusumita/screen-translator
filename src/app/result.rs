@@ -49,9 +49,27 @@ pub struct ResultUi {
     texture: Option<TextureHandle>,
     /// Remembered so the floating window reopens where the user left it.
     window_pos: Option<Pos2>,
+    /// Dismiss as soon as the user clicks away. Mirrors the setting; kept here
+    /// so the view does not need the whole `Settings`.
+    pub close_on_focus_loss: bool,
+    /// A window is not focused on the frame it is created, and closing on that
+    /// would mean the result never appears at all. Only a *loss* counts.
+    had_focus: bool,
+    /// What the popup actually measured last frame: everything that is not the
+    /// scrolling body, and how tall the body wanted to be. Guessing these with
+    /// a constant left a gap under short results and cut the buttons off long
+    /// ones, because the guess had to be wrong in one direction or the other.
+    popup_chrome: Option<f32>,
+    popup_body: Option<f32>,
+    /// Identifies the content the measurements above belong to, so a result
+    /// arriving does not inherit the size of the spinner that preceded it.
+    popup_measured_for: u64,
 }
 
 const POPUP_WIDTH: f32 = 380.0;
+/// Everything in the popup that is not the text: header, separator, button row
+/// and the spacing around them. The body gets whatever is left.
+const POPUP_CHROME: f32 = 150.0;
 const WINDOW_SIZE: Vec2 = Vec2::new(560.0, 300.0);
 
 impl ResultUi {
@@ -75,6 +93,11 @@ impl ResultUi {
             background: None,
             texture: None,
             window_pos: None,
+            close_on_focus_loss: true,
+            had_focus: false,
+            popup_chrome: None,
+            popup_body: None,
+            popup_measured_for: 0,
         }
     }
 
@@ -114,9 +137,40 @@ impl ResultUi {
         }
     }
 
+    /// Whether clicking away from this window should dismiss it.
+    ///
+    /// Called from inside the viewport, where `viewport().focused` is that
+    /// window's own focus rather than the host's. Pinning the floating window
+    /// is a request for it to stay, so it overrides the setting.
+    fn focus_lost(&mut self, ctx: &egui::Context, pinned: bool) -> bool {
+        if !self.close_on_focus_loss || pinned {
+            return false;
+        }
+        // A translation still arriving is not something to throw away because
+        // the user carried on working while waiting for it.
+        if self.is_loading() {
+            return false;
+        }
+
+        let focused = ctx.input(|i| i.viewport().focused).unwrap_or(false);
+        if focused {
+            self.had_focus = true;
+            false
+        } else {
+            self.had_focus
+        }
+    }
+
     // ── 1a: glass popup at the selection ─────────────────────────────────────
 
     fn render_popup(&mut self, ctx: &egui::Context, theme: &Theme) {
+        let key = self.stage_key();
+        if self.popup_measured_for != key {
+            self.popup_measured_for = key;
+            self.popup_chrome = None;
+            self.popup_body = None;
+        }
+
         let height = self.popup_height(ctx);
         let pos = self.popup_position(Vec2::new(POPUP_WIDTH, height));
 
@@ -135,12 +189,19 @@ impl ResultUi {
             .with_transparent(true)
             .with_always_on_top();
 
+        // How much room the body is allowed this frame, from what the chrome
+        // actually measured last frame.
+        let body_max = (height - self.popup_chrome.unwrap_or(POPUP_CHROME)).max(48.0);
+        let mut measured_body: Option<f32> = None;
+        let mut shown_body: Option<f32> = None;
+        let mut measured_total: Option<f32> = None;
+
         ctx.show_viewport_immediate(
             ViewportId::from_hash_of("sakura_result_popup"),
             builder,
             |ctx, _| {
                 transparent_panel(ctx, theme, |ui| {
-                    widgets::glass_frame(theme).show(ui, |ui| {
+                    let frame = widgets::glass_frame(theme).show(ui, |ui| {
                         ui.set_width(POPUP_WIDTH - 2.0);
                         ui.vertical(|ui| {
                             ui.add_space(9.0);
@@ -155,29 +216,38 @@ impl ResultUi {
                                 }
                                 Stage::Done(r) => {
                                     ui.add_space(6.0);
-                                    padded(ui, |ui| {
-                                        ui.label(
-                                            egui::RichText::new(crate::shared::logging::clip(
-                                                &r.original,
-                                                400,
-                                            ))
-                                            .font(text::small())
-                                            .color(theme.text_dim),
-                                        );
-                                    });
-                                    ui.add_space(6.0);
-                                    padded(ui, |ui| {
+                                    // One scroll area over both halves, not just
+                                    // the translation: whatever the text does,
+                                    // the body is bounded and the buttons below
+                                    // it stay reachable.
+                                    let out = padded(ui, |ui| {
                                         egui::ScrollArea::vertical()
-                                            .max_height(height - 150.0)
+                                            .max_height(body_max)
                                             .auto_shrink([false, true])
                                             .show(ui, |ui| {
+                                                ui.label(
+                                                    egui::RichText::new(
+                                                        crate::shared::logging::clip(
+                                                            &r.original,
+                                                            400,
+                                                        ),
+                                                    )
+                                                    .font(text::small())
+                                                    .color(theme.text_dim),
+                                                );
+                                                ui.add_space(6.0);
                                                 ui.label(
                                                     egui::RichText::new(&r.translated)
                                                         .font(text::translation())
                                                         .color(theme.text),
                                                 );
-                                            });
+                                            })
                                     });
+                                    // What the body wanted, and what it was
+                                    // given: the difference between the two is
+                                    // whether a scrollbar is needed at all.
+                                    measured_body = Some(out.content_size.y);
+                                    shown_body = Some(out.inner_rect.height());
                                 }
                             }
 
@@ -254,9 +324,10 @@ impl ResultUi {
                             );
                         });
                     });
+                    measured_total = Some(frame.response.rect.height());
                 });
 
-                if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                if ctx.input(|i| i.key_pressed(egui::Key::Escape)) || self.focus_lost(ctx, false) {
                     close = true;
                 }
                 if copy_requested(ctx) {
@@ -268,15 +339,58 @@ impl ResultUi {
             },
         );
 
+        // Everything that is not the body: header, separator, buttons, spacing.
+        // Taken from what was drawn rather than assumed, so the window is
+        // exactly as tall as its contents until it hits the ceiling.
+        if let (Some(total), Some(shown)) = (measured_total, shown_body) {
+            let chrome = (total - shown).max(0.0);
+            if self.popup_chrome.is_none_or(|c| (c - chrome).abs() > 0.5) {
+                self.popup_chrome = Some(chrome);
+                ctx.request_repaint();
+            }
+        }
+        if let Some(body) = measured_body {
+            if self.popup_body.is_none_or(|b| (b - body).abs() > 0.5) {
+                self.popup_body = Some(body);
+                ctx.request_repaint();
+            }
+        }
+
         self.actions.extend(actions);
         if close {
             self.actions.push(ResultAction::Close);
         }
     }
 
+    /// A cheap identity for what the popup is currently showing.
+    fn stage_key(&self) -> u64 {
+        match &self.stage {
+            Stage::Loading { .. } => 1,
+            Stage::Error(msg) => 2 ^ (msg.len() as u64) << 8,
+            Stage::Done(r) => {
+                3 ^ (r.original.len() as u64) << 8 ^ (r.translated.len() as u64) << 32
+            }
+        }
+    }
+
+    /// Tall enough for what is in it, and no taller.
+    ///
+    /// The first frame has nothing measured yet, so the text is laid out to get
+    /// a starting figure; from the second frame on the window follows what was
+    /// actually drawn. Text laid out on its own is never quite what a `Ui`
+    /// produces — spacing, wrapping inside a narrower column — and the gap
+    /// showed up as either empty space under the buttons or buttons cut off at
+    /// the bottom edge.
     fn popup_height(&self, ctx: &egui::Context) -> f32 {
+        let ceiling = self.max_popup_height();
+        let floor = 120.0_f32.min(ceiling);
+
+        if let (Some(chrome), Some(body)) = (self.popup_chrome, self.popup_body) {
+            return (chrome + body).clamp(floor, ceiling);
+        }
+
         let Stage::Done(r) = &self.stage else {
-            return 150.0;
+            return 150.0_f32.clamp(floor, ceiling);
         };
         let width = POPUP_WIDTH - 28.0;
         let measure = |s: &str, font: egui::FontId| {
@@ -291,33 +405,46 @@ impl ResultUi {
                 .y
             })
         };
-        let original = measure(&r.original, text::small()).min(48.0);
-        let translated = measure(&r.translated, text::translation()).min(260.0);
-        (110.0 + original + translated).clamp(150.0, 460.0)
+        let original = measure(&r.original, text::small());
+        let translated = measure(&r.translated, text::translation());
+        (POPUP_CHROME + original + translated).clamp(floor, ceiling)
+    }
+
+    /// What is left of the work area once the popup keeps a margin from both
+    /// edges. Never smaller than something that can still show a line of text
+    /// and the buttons.
+    fn max_popup_height(&self) -> f32 {
+        let (_, _, _, wh) = self.work_area_points();
+        (wh - 16.0).clamp(150.0, 460.0)
+    }
+
+    /// The area a window may occupy, in the same points the viewport builder
+    /// speaks — the desktop minus the taskbar, the menu bar and the Dock.
+    fn work_area_points(&self) -> (f32, f32, f32, f32) {
+        let ppp = self.geometry.points_per_pixel;
+        let area = crate::features::capture::work_area();
+        (
+            area.x as f32 / ppp,
+            area.y as f32 / ppp,
+            area.w as f32 / ppp,
+            area.h as f32 / ppp,
+        )
     }
 
     /// Below the selection, flipped above when there is no room, and always
-    /// inside the desktop.
+    /// inside the work area — the desktop would put its last line under the
+    /// Dock or the taskbar.
     fn popup_position(&self, size: Vec2) -> Pos2 {
         let ppp = self.geometry.points_per_pixel;
-        let desktop = self.geometry.desktop;
-        let (dx, dy) = (desktop.x as f32 / ppp, desktop.y as f32 / ppp);
-        let (dw, dh) = (desktop.w as f32 / ppp, desktop.h as f32 / ppp);
-
-        let ax = self.anchor.x as f32 / ppp;
-        let below = self.anchor.bottom() as f32 / ppp + 8.0;
-        let above = self.anchor.y as f32 / ppp - size.y - 8.0;
-
-        let y = if below + size.y <= dy + dh {
-            below
-        } else if above >= dy {
-            above
-        } else {
-            // Neither fits: sit against the bottom edge.
-            (dy + dh - size.y).max(dy)
-        };
-        let x = ax.clamp(dx, (dx + dw - size.x).max(dx));
-        Pos2::new(x, y)
+        let anchor = Rect::from_min_max(
+            Pos2::new(self.anchor.x as f32 / ppp, self.anchor.y as f32 / ppp),
+            Pos2::new(
+                self.anchor.right() as f32 / ppp,
+                self.anchor.bottom() as f32 / ppp,
+            ),
+        );
+        let (x, y, w, h) = self.work_area_points();
+        place_beside(anchor, size, Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, h)))
     }
 
     // ── 1b: translation painted over the original ────────────────────────────
@@ -330,17 +457,33 @@ impl ResultUi {
         let show_original = self.show_original;
         let mut toggle_original = None;
 
+        let builder = ViewportBuilder::default()
+            .with_position(geometry.window_pos_points())
+            .with_inner_size(geometry.window_size_points())
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_taskbar(false)
+            .with_always_on_top()
+            .with_transparent(true);
+
+        // This view covers the desktop exactly like the capture overlay, so it
+        // needs the same push past the menu bar and the Dock — without it the
+        // frozen backdrop sits below both and no longer lines up with what is
+        // actually on screen.
+        #[cfg(target_os = "macos")]
+        let builder = builder
+            .with_title(crate::features::capture::mac_window::INLINE_TITLE)
+            .with_active(false);
+
         ctx.show_viewport_immediate(
             ViewportId::from_hash_of("sakura_result_inline"),
-            ViewportBuilder::default()
-                .with_position(geometry.window_pos_points())
-                .with_inner_size(geometry.window_size_points())
-                .with_decorations(false)
-                .with_resizable(false)
-                .with_taskbar(false)
-                .with_always_on_top()
-                .with_transparent(true),
+            builder,
             |ctx, _| {
+                #[cfg(target_os = "macos")]
+                crate::features::capture::mac_window::present_overlay(
+                    crate::features::capture::mac_window::INLINE_TITLE,
+                );
+
                 if self.texture.is_none() {
                     if let Some(img) = self.background.take() {
                         self.texture =
@@ -468,6 +611,8 @@ impl ResultUi {
                             });
                     });
 
+                // The inline view is the whole desktop; "clicking away" from it
+                // is not a thing, and its own click-anywhere already closes it.
                 if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                     close = true;
                 }
@@ -497,13 +642,25 @@ impl ResultUi {
         let pinned = self.pinned;
         let mut toggle_pin = false;
 
+        // Shrunk to the work area before it is placed: on a small screen, or
+        // one with a tall taskbar, the default would not fit and the buttons
+        // along its bottom edge would be off screen.
+        let (wx, wy, ww, wh) = self.work_area_points();
+        let size = Vec2::new(WINDOW_SIZE.x.min(ww - 16.0), WINDOW_SIZE.y.min(wh - 16.0));
+
         let pos = self
             .window_pos
-            .unwrap_or_else(|| self.popup_position(WINDOW_SIZE));
+            .map(|p| {
+                Pos2::new(
+                    p.x.clamp(wx, (wx + ww - size.x).max(wx)),
+                    p.y.clamp(wy, (wy + wh - size.y).max(wy)),
+                )
+            })
+            .unwrap_or_else(|| self.popup_position(size));
 
         let mut builder = ViewportBuilder::default()
             .with_position(pos)
-            .with_inner_size(WINDOW_SIZE)
+            .with_inner_size(size)
             .with_decorations(false)
             .with_resizable(true)
             .with_min_inner_size([360.0, 200.0])
@@ -707,7 +864,10 @@ impl ResultUi {
                         });
                 });
 
-                if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                // Pinned means "keep this in front of everything", so clicking
+                // away is exactly what the user does with it — it must not
+                // close then.
+                if ctx.input(|i| i.key_pressed(egui::Key::Escape)) || self.focus_lost(ctx, pinned) {
                     close = true;
                 }
                 if copy_requested(ctx) {
@@ -944,4 +1104,104 @@ fn flat(ui: &mut egui::Ui, label: &str) -> egui::Response {
     ui.painter()
         .galley(rect.center() - galley.size() / 2.0, galley, fg);
     resp
+}
+
+/// Places a floating window against a rectangle on screen: below it when there
+/// is room, above it when there is not, and inside `work` regardless.
+///
+/// `work` is the *work area*, not the desktop — the last line of a translation
+/// under the Dock or behind the taskbar is unreadable, which is the same as not
+/// being shown.
+fn place_beside(anchor: Rect, size: Vec2, work: Rect) -> Pos2 {
+    const GAP: f32 = 8.0;
+
+    let below = anchor.max.y + GAP;
+    let above = anchor.min.y - size.y - GAP;
+
+    let y = if below + size.y <= work.max.y {
+        below
+    } else if above >= work.min.y {
+        above
+    } else {
+        // Neither side fits — the selection is most of the screen. Sit against
+        // the bottom edge and let the body scroll.
+        work.max.y - size.y
+    };
+
+    // This clamp is what actually guarantees the window is on screen. The
+    // branches above choose where it *should* sit; the clamp handles the cases
+    // where that answer is still outside — an anchor on another monitor, or a
+    // work area smaller than the window itself.
+    Pos2::new(
+        anchor.min.x.clamp(work.min.x, (work.max.x - size.x).max(work.min.x)),
+        y.clamp(work.min.y, (work.max.y - size.y).max(work.min.y)),
+    )
+}
+
+#[cfg(test)]
+mod placement_tests {
+    use super::*;
+
+    /// 1920×1200 with a 40-point taskbar or Dock along the bottom.
+    const WORK: Rect = Rect {
+        min: Pos2::new(0.0, 0.0),
+        max: Pos2::new(1920.0, 1160.0),
+    };
+    const SIZE: Vec2 = Vec2::new(380.0, 400.0);
+
+    fn anchor(x: f32, y: f32, w: f32, h: f32) -> Rect {
+        Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, h))
+    }
+
+    #[test]
+    fn it_sits_under_the_selection_when_there_is_room() {
+        let p = place_beside(anchor(100.0, 100.0, 300.0, 200.0), SIZE, WORK);
+        assert_eq!(p, Pos2::new(100.0, 308.0));
+    }
+
+    #[test]
+    fn it_flips_above_when_the_bottom_would_not_fit() {
+        // Selection ends at 900; 900 + 8 + 400 = 1308, past the work area.
+        let p = place_beside(anchor(100.0, 500.0, 300.0, 400.0), SIZE, WORK);
+        assert_eq!(p.y, 500.0 - 400.0 - 8.0);
+    }
+
+    #[test]
+    fn a_full_screen_selection_still_lands_inside_the_work_area() {
+        let p = place_beside(anchor(0.0, 0.0, 1920.0, 1160.0), SIZE, WORK);
+        let rect = Rect::from_min_size(p, SIZE);
+        assert!(WORK.contains_rect(rect), "{rect:?} escaped {WORK:?}");
+    }
+
+    #[test]
+    fn it_never_leaves_the_work_area() {
+        for a in [
+            anchor(1900.0, 1140.0, 400.0, 400.0),
+            anchor(-500.0, -500.0, 200.0, 200.0),
+            anchor(1919.0, 0.0, 1.0, 1.0),
+            anchor(0.0, 1159.0, 1.0, 1.0),
+        ] {
+            let rect = Rect::from_min_size(place_beside(a, SIZE, WORK), SIZE);
+            assert!(WORK.contains_rect(rect), "anchor {a:?} put it at {rect:?}");
+        }
+    }
+
+    #[test]
+    fn a_work_area_smaller_than_the_window_pins_it_to_the_corner() {
+        let tiny = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(200.0, 200.0));
+        let p = place_beside(anchor(10.0, 10.0, 50.0, 50.0), SIZE, tiny);
+        assert_eq!(p, tiny.min);
+    }
+
+    /// The work area does not have to start at the origin: a second monitor
+    /// above or to the left of the primary one gives it negative coordinates.
+    #[test]
+    fn it_respects_a_work_area_that_starts_off_origin() {
+        let left = Rect::from_min_max(Pos2::new(-1920.0, -100.0), Pos2::new(0.0, 980.0));
+        let rect = Rect::from_min_size(
+            place_beside(anchor(-1800.0, 800.0, 200.0, 200.0), SIZE, left),
+            SIZE,
+        );
+        assert!(left.contains_rect(rect), "{rect:?} escaped {left:?}");
+    }
 }

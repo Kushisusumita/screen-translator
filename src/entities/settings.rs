@@ -701,6 +701,18 @@ pub struct Settings {
     pub play_sound: bool,
     /// Keep the result window above everything else.
     pub pin_result_window: bool,
+    /// Dismiss the result as soon as the user clicks away from it. On by
+    /// default: a translation is read once, and a window that has to be closed
+    /// by hand is one more thing in the way.
+    pub close_result_on_focus_loss: bool,
+    /// Raise a desktop notification when a newer release appears. On by
+    /// default — the app sits in the tray, so there is nowhere else a user
+    /// would notice.
+    pub notify_about_updates: bool,
+    /// The release the user has already been told about, so the same version
+    /// does not announce itself at every launch.
+    #[serde(default)]
+    pub notified_version: String,
     pub history_limit: usize,
 }
 
@@ -721,6 +733,9 @@ impl Default for Settings {
             show_mode_hud: true,
             play_sound: false,
             pin_result_window: false,
+            close_result_on_focus_loss: true,
+            notify_about_updates: true,
+            notified_version: String::new(),
             history_limit: 50,
         }
     }

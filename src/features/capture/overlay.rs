@@ -192,6 +192,17 @@ pub fn render(ctx: &egui::Context, theme: &Theme, state: &mut OverlayState) {
 }
 
 fn handle_region_drag(response: &egui::Response, state: &mut OverlayState, ctx: &egui::Context) {
+    // Right click throws the marquee away and leaves the overlay up, so the
+    // next drag starts from nothing. Esc is the other thing entirely — it
+    // abandons the capture — and using it to redraw a rectangle means pressing
+    // the hotkey again and waiting for another screen grab.
+    if response.secondary_clicked() {
+        state.drag_start = None;
+        state.drag_current = None;
+        state.move_anchor = None;
+        return;
+    }
+
     let space_held = ctx.input(|i| i.key_down(egui::Key::Space));
 
     // Space turns the drag into a move of the whole marquee — the design's
@@ -480,7 +491,7 @@ fn paint_hint(ctx: &egui::Context, theme: &Theme, state: &OverlayState) {
     // the design spells both out differently in the two rounds.
     let hint = match state.mode {
         CaptureMode::Region => format!(
-            "Esc — отмена  ·  {space} — переместить выделение  ·  {copy} — скопировать перевод",
+            "Esc — отмена  ·  ПКМ — сбросить выделение  ·  {space} — переместить выделение  ·  {copy} — скопировать перевод",
             space = theme.platform.space_key(),
             copy = theme.platform.copy_shortcut(),
         ),

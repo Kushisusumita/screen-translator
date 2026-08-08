@@ -345,7 +345,7 @@ impl SettingsUi {
                             Section::Engine => self.engine(ui, theme, settings, info, &mut out),
                             Section::Appearance => self.appearance(ui, theme, settings),
                             Section::Logs => self.logs(ui, theme, settings, info, &mut out),
-                            Section::About => self.about(ui, theme, info, &mut out),
+                            Section::About => self.about(ui, theme, settings, info, &mut out),
                         }
                         ui.add_space(2.0);
                     });
@@ -1041,10 +1041,19 @@ impl SettingsUi {
                 ui,
                 theme,
                 RowSpec::new("Держать поверх всех окон")
-                    .subtitle("Окно перевода не уйдёт за другие")
-                    .last(),
+                    .subtitle("Окно перевода не уйдёт за другие"),
                 |ui| {
                     widgets::toggle(ui, theme, &mut s.pin_result_window);
+                },
+            );
+            widgets::row(
+                ui,
+                theme,
+                RowSpec::new("Закрывать при потере фокуса")
+                    .subtitle("Клик мимо окна убирает перевод")
+                    .last(),
+                |ui| {
+                    widgets::toggle(ui, theme, &mut s.close_result_on_focus_loss);
                 },
             );
         });
@@ -1153,6 +1162,7 @@ impl SettingsUi {
         &mut self,
         ui: &mut egui::Ui,
         theme: &Theme,
+        s: &mut Settings,
         info: &SettingsContext<'_>,
         out: &mut SettingsOutput,
     ) {
@@ -1176,6 +1186,15 @@ impl SettingsUi {
 
         widgets::section_caption(ui, theme, "Обновления");
         widgets::list(ui, theme, |ui| {
+            widgets::row(
+                ui,
+                theme,
+                RowSpec::new("Уведомлять о новой версии")
+                    .subtitle("Системное уведомление, когда выходит обновление"),
+                |ui| {
+                    widgets::toggle(ui, theme, &mut s.notify_about_updates);
+                },
+            );
             widgets::row(
                 ui,
                 theme,

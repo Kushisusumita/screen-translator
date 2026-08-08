@@ -102,6 +102,74 @@ pub fn virtual_desktop() -> Bounds {
     }
 }
 
+/// Where a normal window may sit: the desktop minus the taskbar, the menu bar
+/// and the Dock, in desktop physical pixels.
+///
+/// The capture overlay covers the whole desktop on purpose. Everything else —
+/// the result popup, the floating window — belongs inside this, or it ends up
+/// half under the Dock with its last line unreadable.
+pub fn work_area() -> Bounds {
+    let desktop = virtual_desktop();
+
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::RECT;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SystemParametersInfoW, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+        };
+
+        let mut rect = RECT::default();
+        let ok = unsafe {
+            SystemParametersInfoW(
+                SPI_GETWORKAREA,
+                0,
+                Some(&mut rect as *mut RECT as *mut _),
+                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+            )
+        };
+        if ok.is_ok() {
+            let area = Bounds {
+                x: rect.left,
+                y: rect.top,
+                w: rect.right - rect.left,
+                h: rect.bottom - rect.top,
+            };
+            // Only covers the primary monitor, so it is an intersection rather
+            // than a replacement: a second screen keeps its full height.
+            if area.w > 0 && area.h > 0 {
+                return area.clamp_to(desktop).unwrap_or(desktop);
+            }
+        }
+        debug!("SPI_GETWORKAREA gave nothing usable; using the whole desktop");
+        desktop
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let Some((x, y, w, h)) = super::mac_window::work_area_points() else {
+            return desktop;
+        };
+        // AppKit answers in points; everything here is in desktop physical
+        // pixels. The menu bar and the Dock are on the primary screen, so its
+        // scale is the one that applies.
+        let scale = portable::primary_scale() as f64;
+        let area = Bounds {
+            x: desktop.x + (x * scale).round() as i32,
+            y: desktop.y + (y * scale).round() as i32,
+            w: (w * scale).round() as i32,
+            h: (h * scale).round() as i32,
+        };
+        area.clamp_to(desktop).unwrap_or(desktop)
+    }
+
+    // No portable way to ask X11 or Wayland for the panel geometry, and guessing
+    // is worse than the status quo.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        desktop
+    }
+}
+
 /// Frame of the window that currently has focus, in desktop physical pixels.
 ///
 /// Captured *before* the overlay appears — once the overlay is up it is itself
@@ -314,6 +382,18 @@ mod portable {
 
     fn scaled(v: i32, scale: f32) -> i32 {
         (v as f32 * scale).round() as i32
+    }
+
+    /// Scale factor of the primary monitor, for the platform geometry that is
+    /// only ever reported for that one — the menu bar and the Dock.
+    pub fn primary_scale() -> f32 {
+        let screens = screens();
+        screens
+            .iter()
+            .find(|s| s.monitor.is_primary().unwrap_or(false))
+            .or_else(|| screens.first())
+            .map(|s| s.scale)
+            .unwrap_or(1.0)
     }
 
     /// Union of every monitor, in desktop physical pixels.

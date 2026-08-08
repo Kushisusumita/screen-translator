@@ -83,6 +83,8 @@ windows = { version = "0.58", features = [
     "Win32_System_Threading",
 ] }
 winreg = "0.52"
+# Action Center toasts for the "update available" notification.
+tauri-winrt-notification = "0.8"
 
 [build-dependencies]
 # The build script rasterises the app icon from the same geometry the UI draws.
