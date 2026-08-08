@@ -22,8 +22,8 @@
 
 use objc2::MainThreadMarker;
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSScreen, NSScreenSaverWindowLevel, NSWindow,
-    NSWindowCollectionBehavior,
+    NSApplication, NSApplicationActivationPolicy, NSColor, NSScreen, NSScreenSaverWindowLevel,
+    NSWindow, NSWindowCollectionBehavior,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use tracing::info;
@@ -55,6 +55,50 @@ pub fn become_menu_bar_agent() {
     }
     if app.setActivationPolicy(NSApplicationActivationPolicy::Accessory) {
         info!("Running as a menu-bar agent");
+    }
+}
+
+/// Clips a frameless window to rounded corners.
+///
+/// egui draws a rounded panel, but the window under it is a rectangle, and on
+/// this platform it is an opaque one: eframe asks for a transparent window and
+/// the GL config refuses it, so the four corners outside the rounding stay
+/// filled with window background. The result is a rounded card sitting on a
+/// square of dark grey, with the square's corners showing.
+///
+/// The fix is one level below egui: make the window itself clear and let the
+/// content view's layer do the rounding, so those corners are genuinely absent
+/// rather than painted over.
+///
+/// Called every frame, for the same reason the overlay's geometry is:
+/// idempotent, and the view does not exist yet on the first one.
+pub fn round_corners(title: &str, radius: f64) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+
+    let app = NSApplication::sharedApplication(mtm);
+    for window in app.windows().iter() {
+        if window.title().to_string() != title {
+            continue;
+        }
+
+        if window.isOpaque() {
+            window.setOpaque(false);
+            window.setBackgroundColor(Some(&NSColor::clearColor()));
+        }
+
+        let Some(view) = window.contentView() else {
+            continue;
+        };
+        if !view.wantsLayer() {
+            view.setWantsLayer(true);
+        }
+        let Some(layer) = view.layer() else { continue };
+        if layer.cornerRadius() != radius {
+            layer.setCornerRadius(radius);
+            layer.setMasksToBounds(true);
+        }
     }
 }
 

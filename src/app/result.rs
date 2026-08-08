@@ -71,6 +71,12 @@ pub struct ResultUi {
 }
 
 const POPUP_WIDTH: f32 = 380.0;
+/// Only ever used to find these windows again through the platform's own API,
+/// so their corners can be rounded; nothing draws them.
+#[cfg(any(target_os = "macos", windows))]
+const POPUP_TITLE: &str = "Sakura result popup";
+#[cfg(any(target_os = "macos", windows))]
+const WINDOW_TITLE: &str = "Sakura result window";
 /// Everything in the popup that is not the text: header, separator, button row
 /// and the spacing around them. The body gets whatever is left.
 const POPUP_CHROME: f32 = 150.0;
@@ -195,6 +201,11 @@ impl ResultUi {
             .with_transparent(true)
             .with_always_on_top();
 
+        // The title is never drawn — there is no chrome — but it is how the
+        // window is found again so its corners can be rounded.
+        #[cfg(any(target_os = "macos", windows))]
+        let builder = builder.with_title(POPUP_TITLE);
+
         // How much room the body is allowed this frame, from what the chrome
         // actually measured last frame.
         let chrome = self.popup_chrome.unwrap_or(POPUP_CHROME);
@@ -213,6 +224,14 @@ impl ResultUi {
             ViewportId::from_hash_of("sakura_result_popup"),
             builder,
             |ctx, _| {
+                #[cfg(target_os = "macos")]
+                crate::features::capture::mac_window::round_corners(
+                    POPUP_TITLE,
+                    theme.metrics.surface_radius as f64,
+                );
+                #[cfg(windows)]
+                crate::features::capture::win_window::round_corners(POPUP_TITLE);
+
                 transparent_panel(ctx, theme, |ui| {
                     let frame = widgets::glass_frame(theme).show(ui, |ui| {
                         ui.set_width(POPUP_WIDTH - 2.0);
@@ -586,7 +605,28 @@ impl ResultUi {
 
                         // Opaque plate so the original text underneath does not
                         // show through the replacement.
-                        let plate = patch.expand(6.0);
+                        //
+                        // Grown downwards when the translation is longer than the
+                        // text it replaces — which it usually is, going into
+                        // Russian — rather than left at the size of the original
+                        // with everything past the second line hidden behind a
+                        // scrollbar nobody looks for. It stops at the bottom of
+                        // the screen, and only then does the body scroll.
+                        let plate = {
+                            let base = patch.expand(6.0);
+                            let width = (base.width() - 16.0).max(40.0);
+                            let text_h = ctx.fonts(|f| {
+                                f.layout(body.clone(), text::body(), theme.text, width)
+                                    .size()
+                                    .y
+                            });
+                            let wanted = text_h + 12.0;
+                            let height = base
+                                .height()
+                                .max(wanted)
+                                .min((screen.max.y - base.min.y - 8.0).max(base.height()));
+                            Rect::from_min_size(base.min, Vec2::new(base.width(), height))
+                        };
                         ui.painter().rect_filled(
                             plate,
                             3.0,
@@ -725,17 +765,65 @@ impl ResultUi {
         if pinned {
             builder = builder.with_always_on_top();
         }
+        #[cfg(any(target_os = "macos", windows))]
+        let builder = builder.with_title(WINDOW_TITLE);
+
+        let has_result = matches!(self.stage, Stage::Done(_));
+        // Laid out separately so it can be placed bottom-up, before the body
+        // gets to claim the space.
+        let footer = |ui: &mut egui::Ui, actions: &mut Vec<ResultAction>| {
+            padded(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.add_enabled_ui(has_result, |ui| {
+                        if widgets::primary_button(ui, theme, "Копировать").clicked() {
+                            actions.push(ResultAction::Copy);
+                        }
+                        if widgets::secondary_button(ui, theme, "Озвучить").clicked() {
+                            actions.push(ResultAction::Speak);
+                        }
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(format!("История · {history_len}"))
+                                .font(text::caption())
+                                .color(theme.text_dim),
+                        );
+                    });
+                });
+            });
+        };
 
         ctx.show_viewport_immediate(
             ViewportId::from_hash_of("sakura_result_window"),
             builder,
             |ctx, _| {
+                #[cfg(target_os = "macos")]
+                crate::features::capture::mac_window::round_corners(WINDOW_TITLE, 12.0);
+                #[cfg(windows)]
+                crate::features::capture::win_window::round_corners(WINDOW_TITLE);
+
                 transparent_panel(ctx, theme, |ui| {
                     egui::Frame::none()
                         .fill(theme.glass)
                         .rounding(egui::Rounding::same(12.0))
                         .stroke(theme.border_stroke())
                         .show(ui, |ui| {
+                            // The frame fills the window, and the footer is laid
+                            // out first from the bottom: whatever it needs is
+                            // taken off the top of what the body may use, so the
+                            // buttons cannot be pushed past the bottom edge no
+                            // matter how the user has resized the window.
+                            ui.set_min_size(ui.available_size());
+                            ui.with_layout(
+                                egui::Layout::bottom_up(egui::Align::Min),
+                                |ui| {
+                            ui.add_space(9.0);
+                            footer(ui, &mut actions);
+                            ui.add_space(7.0);
+                            widgets::separator(ui, theme);
+
+                            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                             // Title bar, with the macOS traffic lights the design
                             // draws — on Windows they read as a close affordance
                             // just as well, and the window has no chrome of its own.
@@ -850,7 +938,11 @@ impl ResultUi {
                                     ui.add_space(16.0);
                                 }
                                 Stage::Done(r) => {
-                                    let body_h = (ui.available_height() - 46.0).max(80.0);
+                                    // Whatever the footer left behind. It is laid
+                                    // out first, bottom-up, so this is a real
+                                    // number rather than the 46-point guess that
+                                    // used to push the buttons off the window.
+                                    let body_h = ui.available_height().max(80.0);
                                     ui.allocate_ui(Vec2::new(ui.available_width(), body_h), |ui| {
                                         ui.horizontal_top(|ui| {
                                             let col = (ui.available_width() - 1.0) / 2.0;
@@ -885,39 +977,9 @@ impl ResultUi {
                                 }
                             }
 
-                            widgets::separator(ui, theme);
-                            ui.add_space(7.0);
-                            padded(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 6.0;
-                                    let has_result = matches!(self.stage, Stage::Done(_));
-                                    ui.add_enabled_ui(has_result, |ui| {
-                                        if widgets::primary_button(ui, theme, "Копировать")
-                                            .clicked()
-                                        {
-                                            actions.push(ResultAction::Copy);
-                                        }
-                                        if widgets::secondary_button(ui, theme, "Озвучить")
-                                            .clicked()
-                                        {
-                                            actions.push(ResultAction::Speak);
-                                        }
-                                    });
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            ui.label(
-                                                egui::RichText::new(format!(
-                                                    "История · {history_len}"
-                                                ))
-                                                .font(text::caption())
-                                                .color(theme.text_dim),
-                                            );
-                                        },
-                                    );
-                                });
                             });
-                            ui.add_space(9.0);
+                                },
+                            );
                         });
                 });
 

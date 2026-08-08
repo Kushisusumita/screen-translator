@@ -69,6 +69,11 @@ pub struct App {
     last_capture: Option<(Bounds, Geometry)>,
 
     settings_open: bool,
+    /// The settings window has just been asked for and still needs to be
+    /// brought to the front. An accessory application does not come forward
+    /// on its own — but doing it every frame, as this used to, means the
+    /// user cannot click away into another app at all.
+    settings_wants_focus: bool,
     settings_ui: SettingsUi,
     settings_dirty: bool,
 
@@ -129,6 +134,7 @@ impl App {
             desktop_image: None,
             last_capture: None,
             settings_open: open_settings.is_some(),
+            settings_wants_focus: open_settings.is_some(),
             settings_ui: SettingsUi::new(open_settings.unwrap_or(Section::General)),
             settings_dirty: false,
             pipeline: Arc::new(Mutex::new(None)),
@@ -158,6 +164,7 @@ impl App {
                 TrayEvent::ShowSettings => {
                     self.settings_ui.on_open(&self.settings);
                     self.settings_open = true;
+                    self.settings_wants_focus = true;
                 }
                 TrayEvent::Exit => {
                     info!("Exit requested from the tray");
@@ -339,13 +346,15 @@ impl App {
                         error!(error = %e, "Clipboard copy failed");
                     }
                 }
-                self.history.push(HistoryEntry {
-                    original: res.original.clone(),
-                    translated: res.translated.clone(),
-                    source: res.source,
-                    target: res.target,
-                    engine: res.engine,
-                });
+                if self.settings.keep_history {
+                    self.history.push(HistoryEntry {
+                        original: res.original.clone(),
+                        translated: res.translated.clone(),
+                        source: res.source,
+                        target: res.target,
+                        engine: res.engine,
+                    });
+                }
 
                 if self.settings.result_view == ResultView::None {
                     // Clipboard-only mode: nothing to show, and no empty popup.
@@ -576,6 +585,9 @@ impl App {
             .with_min_inner_size([680.0, 460.0]);
         builder = builder.with_icon(Arc::new(load_app_icon()));
 
+        // Read before the closure borrows `self`.
+        let wants_focus = std::mem::take(&mut self.settings_wants_focus);
+
         let mut settings = self.settings.clone();
         let mut out = crate::features::settings::ui::SettingsOutput::default();
 
@@ -583,10 +595,15 @@ impl App {
             ViewportId::from_hash_of("sakura_settings"),
             builder,
             |ctx, _| {
-                // An accessory application does not come forward on its own, so
-                // the settings window would open behind whatever is in front.
-                #[cfg(target_os = "macos")]
-                crate::features::capture::mac_window::activate();
+                // Once, when the window is asked for. An accessory
+                // application does not come forward on its own, but doing
+                // this every frame pins the focus here and the user cannot
+                // switch to anything else while settings are open.
+                if wants_focus {
+                    #[cfg(target_os = "macos")]
+                    crate::features::capture::mac_window::activate();
+                    ctx.send_viewport_cmd(ViewportCommand::Focus);
+                }
 
                 theme.apply(ctx);
                 out = self.settings_ui.show(
@@ -602,7 +619,6 @@ impl App {
                         rejected_hotkeys: &rejected,
                         log_dir: logging::default_log_dir(),
                         history: &self.history,
-                        translating: self.is_translating(),
                     },
                 );
 
@@ -636,6 +652,10 @@ impl App {
     ) {
         let theme_changed = next.theme != self.settings.theme;
         let history_limit_changed = next.history_limit != self.settings.history_limit;
+        // Turning the history off throws away what is already in it: leaving
+        // the list behind would be keeping exactly what the user just asked
+        // not to keep.
+        let history_switched_off = self.settings.keep_history && !next.keep_history;
         let hotkeys_changed =
             out.hotkeys_changed || next.hotkeys.all() != self.settings.hotkeys.all();
 
@@ -649,6 +669,9 @@ impl App {
         }
         if history_limit_changed {
             self.history.set_limit(self.settings.history_limit);
+        }
+        if history_switched_off {
+            self.history.clear();
         }
         if hotkeys_changed {
             self.hotkeys.update(self.settings.hotkeys);

@@ -60,8 +60,15 @@ objc2-app-kit = { version = "0.3", features = [
     # Carries NSApplicationActivationPolicy, which turns the process into a
     # menu-bar agent so the overlay does not drag the user to another Space.
     "NSRunningApplication",
+    # Rounding the corners of the frameless windows: the view's layer does the
+    # clipping, and the window behind it has to be clear for that to show.
+    "NSView",
+    "NSColor",
+    "objc2-quartz-core",
 ] }
 objc2-foundation = { version = "0.3", features = ["NSGeometry"] }
+# CALayer, for clipping a frameless window to rounded corners.
+objc2-quartz-core = { version = "0.3", features = ["CALayer"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
