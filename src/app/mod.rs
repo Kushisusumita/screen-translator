@@ -52,7 +52,9 @@ enum UpdateState {
     Error(String),
 }
 
-type PipelineSlot = Arc<Mutex<Option<(u64, Result<PipelineResult, String>)>>>;
+/// The error side carries the message and whether it is a failure at all:
+/// "no text in this rectangle" is an outcome, not a fault.
+type PipelineSlot = Arc<Mutex<Option<(u64, Result<PipelineResult, (String, bool)>)>>>;
 
 pub struct App {
     settings: Settings,
@@ -272,7 +274,7 @@ impl App {
             Ok(j) => j,
             Err(e) => {
                 error!(error = %e, "Capture failed");
-                self.show_stage(Stage::Error(e.to_string()), bounds, geometry);
+                self.show_stage(Stage::Error(e.user_message()), bounds, geometry);
                 return;
             }
         };
@@ -295,9 +297,17 @@ impl App {
         let repaint = ctx.cloned();
 
         self.rt.spawn(async move {
-            let outcome = run_pipeline(&jpeg, &params)
-                .await
-                .map_err(|e| e.to_string());
+            let outcome = run_pipeline(&jpeg, &params).await.map_err(|e| {
+                // Full detail to the log, a sentence to the screen — and a
+                // flag for whether this is a failure at all.
+                let empty = matches!(e, crate::shared::error::AppError::NoText);
+                if empty {
+                    info!("Capture contained no text");
+                } else {
+                    error!(error = %e, "Pipeline failed");
+                }
+                (e.user_message(), empty)
+            });
             {
                 let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
                 *guard = Some((generation, outcome));
@@ -367,12 +377,17 @@ impl App {
                     ui.stage = Stage::Done(Box::new(res));
                 }
             }
-            Err(msg) => {
-                error!(error = %msg, "Translation failed");
-                // An error is always worth showing, even in clipboard-only mode —
-                // otherwise a failed capture is indistinguishable from success.
+            Err((msg, empty)) => {
+                // Worth showing either way, even in clipboard-only mode:
+                // otherwise a capture that produced nothing is
+                // indistinguishable from one that worked.
+                let stage = if empty {
+                    Stage::Empty(msg)
+                } else {
+                    Stage::Error(msg)
+                };
                 if let Some(ui) = self.result.as_mut() {
-                    ui.stage = Stage::Error(msg);
+                    ui.stage = stage;
                     if ui.view == ResultView::None {
                         ui.view = ResultView::Popup;
                     }
@@ -380,7 +395,7 @@ impl App {
                     let (bounds, geometry) = self
                         .last_capture
                         .unwrap_or((virtual_desktop(), Geometry::new(virtual_desktop(), 1.0)));
-                    self.show_stage(Stage::Error(msg), bounds, geometry);
+                    self.show_stage(stage, bounds, geometry);
                 }
             }
         }
@@ -575,7 +590,9 @@ impl App {
                     None,
                 ),
                 UpdateState::Error(e) => (
-                    t("Error: {message}").replace("{message}", e),
+                    // Already a sentence written for the user; wrapping it in
+                    // "Error:" only makes it look like a crash report.
+                    e.clone(),
                     true,
                     false,
                     None,

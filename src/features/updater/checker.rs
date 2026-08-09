@@ -1,4 +1,4 @@
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::shared::i18n::t;
 use crate::shared::logging::clip;
@@ -49,7 +49,12 @@ pub async fn check_for_update() -> Result<Option<UpdateInfo>, String> {
         .header("Accept", "application/vnd.github+json")
         .send()
         .await
-        .map_err(|e| t("Network unavailable: {error}").replace("{error}", &e.to_string()))?;
+        .map_err(|e| {
+            // The URL and the transport error belong in the log. "Check"
+            // returning a GitHub API address at the user helps nobody.
+            warn!(error = %e, "Update check could not reach GitHub");
+            t("Could not reach the update server").to_string()
+        })?;
 
     let status = resp.status();
     if status.as_u16() == 404 {
@@ -57,7 +62,8 @@ pub async fn check_for_update() -> Result<Option<UpdateInfo>, String> {
         return Ok(None);
     }
     if !status.is_success() {
-        return Err(t("GitHub returned HTTP {status}").replace("{status}", &status.to_string()));
+        warn!(status = status.as_u16(), "Update check refused");
+        return Err(t("Could not check for updates right now").to_string());
     }
 
     let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;

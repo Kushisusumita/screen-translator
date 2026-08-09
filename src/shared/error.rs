@@ -14,6 +14,10 @@ pub enum AppError {
     Image(image::ImageError),
     Clipboard(arboard::Error),
     Other(String),
+    /// The capture contained no text. Not a failure — the user pointed at a
+    /// picture, or at nothing — so it is carried separately from the errors
+    /// and shown in a different voice.
+    NoText,
 }
 
 impl fmt::Display for AppError {
@@ -29,11 +33,53 @@ impl fmt::Display for AppError {
             AppError::Image(e) => write!(f, "{}: {e}", t("Image error")),
             AppError::Clipboard(e) => write!(f, "{}: {e}", t("Clipboard error")),
             AppError::Other(s) => write!(f, "{}: {s}", t("Error")),
+            AppError::NoText => write!(f, "no text in the capture"),
         }
     }
 }
 
 impl std::error::Error for AppError {}
+
+impl AppError {
+    /// What the user is told.
+    ///
+    /// `Display` is for the log: it carries the URL, the status line and the
+    /// library's own wording, which is what you want when reading a log file and
+    /// exactly what you do not want on screen. A translation failing is not an
+    /// occasion to show someone a request URL with a session id in it.
+    pub fn user_message(&self) -> String {
+        match self {
+            AppError::Reqwest(e) => {
+                if e.is_timeout() {
+                    t("The service did not answer in time").to_string()
+                } else if e.is_connect() || e.is_request() {
+                    t("No connection to the service").to_string()
+                } else if let Some(status) = e.status() {
+                    if status.is_server_error() {
+                        t("The service is having trouble — try again in a moment").to_string()
+                    } else {
+                        t("The service refused the request").to_string()
+                    }
+                } else {
+                    t("Network error").to_string()
+                }
+            }
+            AppError::Json(_) => t("The service sent something unreadable").to_string(),
+            AppError::Io(_) => t("A file could not be read or written").to_string(),
+            AppError::Toml(_) | AppError::TomlSer(_) => {
+                t("The settings file is damaged").to_string()
+            }
+            #[cfg(windows)]
+            AppError::Windows(_) => t("The system refused the operation").to_string(),
+            AppError::Image(_) => t("The captured image could not be processed").to_string(),
+            AppError::Clipboard(_) => t("The clipboard is not available").to_string(),
+            // These are written by hand at the point they are raised, in the
+            // words the user should see.
+            AppError::Other(s) => s.clone(),
+            AppError::NoText => t("No text found in the selected area.").to_string(),
+        }
+    }
+}
 
 impl From<std::io::Error> for AppError {
     fn from(e: std::io::Error) -> Self {

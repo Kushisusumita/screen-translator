@@ -56,15 +56,18 @@ pub async fn recognize(jpeg: &[u8]) -> Result<OcrResult, AppError> {
     debug!(status = status.as_u16(), body = %clip(&body, 600), "OCR response");
 
     if !status.is_success() {
-        return Err(AppError::Other(format!(
-            "OCR HTTP {} — {}",
-            status,
-            clip(body.trim(), 200)
-        )));
+        // The status and the body are worth having in the log and worth
+        // nothing on screen: the user cannot act on either, and the reply
+        // can carry session identifiers.
+        warn!(status = status.as_u16(), body = %clip(body.trim(), 200), "OCR rejected the image");
+        return Err(AppError::Other(
+            t("Text recognition is unavailable right now").to_string(),
+        ));
     }
 
     let json: Value = serde_json::from_str(&body).map_err(|e| {
-        AppError::Other(t("Unreadable OCR response: {error}").replace("{error}", &e.to_string()))
+        warn!(error = %e, "OCR response was not JSON");
+        AppError::Other(t("Text recognition is unavailable right now").to_string())
     })?;
 
     let result = parse(&json);

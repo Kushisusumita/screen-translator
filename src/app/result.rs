@@ -26,6 +26,10 @@ pub enum Stage {
     Loading { since: Instant },
     Done(Box<PipelineResult>),
     Error(String),
+    /// Nothing went wrong; there was simply nothing to translate. Shown in
+    /// the ordinary text colour, because red says "you broke something" to
+    /// someone who merely selected a photograph.
+    Empty(String),
 }
 
 /// Something the user asked for that the app, not the view, has to carry out.
@@ -245,7 +249,10 @@ impl ResultUi {
                                     loading_body(ui, theme, since.elapsed().as_secs_f32());
                                 }
                                 Stage::Error(msg) => {
-                                    error_body(ui, theme, msg);
+                                    message_body(ui, msg, theme.danger);
+                                }
+                                Stage::Empty(msg) => {
+                                    message_body(ui, msg, theme.text_dim);
                                 }
                                 Stage::Done(r) => {
                                     ui.add_space(6.0);
@@ -441,6 +448,7 @@ impl ResultUi {
         match &self.stage {
             Stage::Loading { .. } => 1,
             Stage::Error(msg) => 2 ^ (msg.len() as u64) << 8,
+            Stage::Empty(msg) => 4 ^ (msg.len() as u64) << 8,
             Stage::Done(r) => {
                 3 ^ (r.original.len() as u64) << 8 ^ (r.translated.len() as u64) << 32
             }
@@ -611,7 +619,7 @@ impl ResultUi {
                                 }
                             }
                             Stage::Loading { .. } => t("Translating…").to_string(),
-                            Stage::Error(e) => e.clone(),
+                            Stage::Error(e) | Stage::Empty(e) => e.clone(),
                         };
 
                         // Opaque plate so the original text underneath does not
@@ -964,7 +972,12 @@ impl ResultUi {
                                 }
                                 Stage::Error(msg) => {
                                     ui.add_space(16.0);
-                                    error_body(ui, theme, msg);
+                                    message_body(ui, msg, theme.danger);
+                                    ui.add_space(16.0);
+                                }
+                                Stage::Empty(msg) => {
+                                    ui.add_space(16.0);
+                                    message_body(ui, msg, theme.text_dim);
                                     ui.add_space(16.0);
                                 }
                                 Stage::Done(r) => {
@@ -1071,6 +1084,13 @@ impl ResultUi {
                 target: "—".into(),
                 right: t("error").into(),
             },
+            // No badge at all: nothing failed, so labelling the header
+            // would be inventing a problem.
+            Stage::Empty(_) => HeaderInfo {
+                source: "—".into(),
+                target: "—".into(),
+                right: String::new(),
+            },
         }
     }
 }
@@ -1164,7 +1184,7 @@ fn loading_body(ui: &mut egui::Ui, theme: &Theme, phase: f32) {
     });
 }
 
-fn error_body(ui: &mut egui::Ui, theme: &Theme, msg: &str) {
+fn message_body(ui: &mut egui::Ui, msg: &str, colour: egui::Color32) {
     padded(ui, |ui| {
         ui.add_space(6.0);
         egui::ScrollArea::vertical()
@@ -1174,7 +1194,7 @@ fn error_body(ui: &mut egui::Ui, theme: &Theme, msg: &str) {
                 ui.label(
                     egui::RichText::new(msg)
                         .font(text::small())
-                        .color(theme.danger),
+                        .color(colour),
                 );
             });
     });

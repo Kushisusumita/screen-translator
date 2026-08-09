@@ -55,6 +55,7 @@ pub async fn translate(
     }
 
     let mut failures: Vec<String> = Vec::new();
+    let mut user_reasons: Vec<String> = Vec::new();
 
     for kind in active {
         let started = Instant::now();
@@ -83,16 +84,23 @@ pub async fn translate(
                     "Empty translation, trying next engine"
                 );
                 failures.push(t("{engine}: empty response").replace("{engine}", kind.label()));
+                user_reasons
+                    .push(t("{engine}: empty response").replace("{engine}", kind.label()));
             }
             Err(e) => {
                 warn!(engine = kind.label(), error = %e, "Engine failed");
                 failures.push(format!("{}: {}", kind.label(), short_reason(&e)));
+                user_reasons.push(format!("{}: {}", kind.label(), e.user_message()));
             }
         }
     }
 
+    // Two audiences, two texts. The log gets what each engine actually said,
+    // URLs and status lines included; the user gets which engines were tried
+    // and why, in words that mean something without a network trace.
+    warn!(reasons = %failures.join(" | "), "Every engine failed");
     Err(AppError::Other(
-        t("Translation failed.\n\n{reasons}").replace("{reasons}", &failures.join("\n")),
+        t("Translation failed.\n\n{reasons}").replace("{reasons}", &user_reasons.join("\n")),
     ))
 }
 
