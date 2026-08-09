@@ -291,6 +291,7 @@ pub static ENTRIES: &[(&str, &str)] = &[
     ("The update was installed but the restart failed: {error}. Start the program manually.", "更新已安装，但重启失败：{error}。请手动启动程序。"),
     ("Theme", "主题"),
     ("Theme and how the translation is shown", "主题与译文显示方式"),
+    ("This release has no build for your system", "此版本没有适用于你系统的构建"),
     ("Timeout, s", "超时（秒）"),
     ("Token", "Token"),
     ("Too many requests, try again later", "请求过多，请稍后重试"),

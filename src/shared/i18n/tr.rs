@@ -291,6 +291,7 @@ pub static ENTRIES: &[(&str, &str)] = &[
     ("The update was installed but the restart failed: {error}. Start the program manually.", "güncelleme kuruldu ama yeniden başlatma başarısız: {error}. Programı elle başlatın."),
     ("Theme", "Tema"),
     ("Theme and how the translation is shown", "Tema ve çevirinin gösterim biçimi"),
+    ("This release has no build for your system", "Bu sürümde sisteminiz için bir yapı yok"),
     ("Timeout, s", "Zaman aşımı, sn"),
     ("Token", "Token"),
     ("Too many requests, try again later", "çok fazla istek, sonra yeniden deneyin"),

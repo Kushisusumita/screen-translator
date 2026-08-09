@@ -291,6 +291,7 @@ pub static ENTRIES: &[(&str, &str)] = &[
     ("The update was installed but the restart failed: {error}. Start the program manually.", "la actualización se instaló, pero el reinicio falló: {error}. Inicia el programa manualmente."),
     ("Theme", "Tema"),
     ("Theme and how the translation is shown", "Tema y forma de mostrar la traducción"),
+    ("This release has no build for your system", "Esta versión no tiene una compilación para tu sistema"),
     ("Timeout, s", "Tiempo de espera, s"),
     ("Token", "Token"),
     ("Too many requests, try again later", "demasiadas solicitudes, inténtalo más tarde"),

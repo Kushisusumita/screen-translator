@@ -172,8 +172,6 @@ pub struct SettingsOutput {
     pub tray_changed: bool,
     pub check_update: bool,
     pub install_update: bool,
-    /// Platforms without a binary in the release open the page instead.
-    pub open_release_page: bool,
     pub test_ai: bool,
     pub open_log_dir: bool,
     pub clear_history: bool,
@@ -1253,24 +1251,11 @@ impl SettingsUi {
                             out.check_update = true;
                         }
                     });
-                    // Only Windows has a binary to install: the release
-                    // carries a .exe and nothing else. Offering "Install"
-                    // elsewhere downloads ten megabytes to be rejected by the
-                    // signature check at the end of it.
-                    if cfg!(windows) {
-                        ui.add_enabled_ui(info.update_install_enabled, |ui| {
-                            if widgets::primary_button(ui, theme, t("Install")).clicked() {
-                                out.install_update = true;
-                            }
-                        });
-                    } else {
-                        ui.add_enabled_ui(info.update_install_enabled, |ui| {
-                            if widgets::primary_button(ui, theme, t("Open the release")).clicked()
-                            {
-                                out.open_release_page = true;
-                            }
-                        });
-                    }
+                    ui.add_enabled_ui(info.update_install_enabled, |ui| {
+                        if widgets::primary_button(ui, theme, t("Install")).clicked() {
+                            out.install_update = true;
+                        }
+                    });
                 },
             );
         });

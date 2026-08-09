@@ -291,6 +291,7 @@ pub static ENTRIES: &[(&str, &str)] = &[
     ("The update was installed but the restart failed: {error}. Start the program manually.", "更新はインストールされましたが、再起動に失敗しました: {error}。手動で起動してください。"),
     ("Theme", "テーマ"),
     ("Theme and how the translation is shown", "テーマと翻訳の表示方法"),
+    ("This release has no build for your system", "このリリースにはお使いのシステム向けのビルドがありません"),
     ("Timeout, s", "タイムアウト（秒）"),
     ("Token", "トークン"),
     ("Too many requests, try again later", "リクエストが多すぎます。時間をおいて再試行してください"),

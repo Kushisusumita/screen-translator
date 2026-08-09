@@ -8,13 +8,17 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    runs-on: windows-latest
+  # Read once, on one runner, so all three builds and the release itself agree
+  # on what is being published.
+  version:
+    runs-on: ubuntu-latest
     # Belt and braces: the trigger above already limits this to main, and this
     # keeps it that way if a tag, a schedule or workflow_dispatch is ever added.
     # A release cut from a feature branch would tag and publish unreviewed work.
     if: github.ref == 'refs/heads/main'
-
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.ver.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -48,6 +52,25 @@ jobs:
             exit 1
           fi
 
+  # One binary per platform, named so the updater can pick its own out of the
+  # release without guessing.
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            asset: screen-translator-windows-x86_64.exe
+          - os: macos-latest
+            asset: screen-translator-macos-universal
+          - os: ubuntu-latest
+            asset: screen-translator-linux-x86_64
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: actions/cache@v4
@@ -56,17 +79,74 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-release-${{ hashFiles('Cargo.toml') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-release-
+
+      # Same list the CI job installs: xcap links against PipeWire for the
+      # Wayland portal and its -sys crate runs bindgen.
+      - name: System libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config clang libclang-dev \
+            libgtk-3-dev \
+            libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libwayland-dev libgl1-mesa-dev \
+            libayatana-appindicator3-dev \
+            libpipewire-0.3-dev libdbus-1-dev \
+            libgbm-dev libxdo-dev
 
       - name: Build
+        if: runner.os != 'macOS'
         run: cargo build --release
+
+      # One file that runs on both Apple silicon and Intel, so the updater has a
+      # single asset to fetch whatever the machine is.
+      - name: Build (universal)
+        if: runner.os == 'macOS'
+        run: |
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          cargo build --release --target aarch64-apple-darwin
+          lipo -create -output target/release/screen-translator \
+            target/x86_64-apple-darwin/release/screen-translator \
+            target/aarch64-apple-darwin/release/screen-translator
+          lipo -info target/release/screen-translator
+
+      - name: Name the binary
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp target/release/screen-translator.exe "${{ matrix.asset }}"
+          else
+            cp target/release/screen-translator "${{ matrix.asset }}"
+            chmod +x "${{ matrix.asset }}"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  publish:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+
+      - name: List what is being published
+        run: ls -la assets
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.ver.outputs.tag }}
-          name: "Sakura Screen Translator ${{ steps.ver.outputs.version }}"
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: "Sakura Screen Translator ${{ needs.version.outputs.version }}"
           generate_release_notes: true
-          files: target/release/screen-translator.exe
+          files: assets/*

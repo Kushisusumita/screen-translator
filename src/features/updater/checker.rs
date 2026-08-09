@@ -24,6 +24,26 @@ pub const ALLOWED_HOSTS: &[&str] = &[
     "release-assets.githubusercontent.com",
 ];
 
+/// The file this platform should download, as the release names it.
+///
+/// Kept beside the workflow that produces them: `release.yml` builds one binary
+/// per platform under exactly these names, and the two have to agree.
+pub const fn asset_name() -> &'static str {
+    #[cfg(windows)]
+    {
+        "screen-translator-windows-x86_64.exe"
+    }
+    // One universal binary covers Apple silicon and Intel.
+    #[cfg(target_os = "macos")]
+    {
+        "screen-translator-macos-universal"
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        "screen-translator-linux-x86_64"
+    }
+}
+
 pub fn url_is_allowed(url: &str) -> bool {
     let Some(rest) = url.strip_prefix("https://") else {
         return false;
@@ -86,10 +106,17 @@ pub async fn check_for_update() -> Result<Option<UpdateInfo>, String> {
         .as_array()
         .ok_or_else(|| t("The release has no files").to_string())?;
 
+    // Each platform has its own binary in the release, named for it. Picking
+    // "the .exe" — which this did — meant macOS and Linux downloaded a
+    // Windows build in full, only for the signature check to throw it away.
+    let wanted = asset_name();
     let asset = assets
         .iter()
-        .find(|a| a["name"].as_str().is_some_and(|n| n.ends_with(".exe")))
-        .ok_or_else(|| t("The release has no .exe file").to_string())?;
+        .find(|a| a["name"].as_str() == Some(wanted))
+        .ok_or_else(|| {
+            warn!(wanted, "The release has no build for this platform");
+            t("This release has no build for your system").to_string()
+        })?;
 
     let url = asset["browser_download_url"]
         .as_str()

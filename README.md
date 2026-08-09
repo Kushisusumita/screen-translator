@@ -37,9 +37,12 @@ set, and the first one that answers wins.
 
 ## ⚡ Quick start
 
-Pre-built binaries for **Windows x64** are on the
+Pre-built binaries for **Windows, macOS and Linux** are on the
 [**Releases**](https://github.com/Kushisusumita/screen-translator/releases) page —
-no installer, just run the executable. **macOS** and **Linux** build from source:
+no installer, just run the file. The macOS build is universal, so one download
+covers Apple silicon and Intel. Updating later is a button in *About*: the app
+fetches the build for its own platform, swaps itself out and restarts. Or build
+it yourself:
 
 ```bash
 # 1. Build it

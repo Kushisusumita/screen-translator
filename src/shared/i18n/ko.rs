@@ -291,6 +291,7 @@ pub static ENTRIES: &[(&str, &str)] = &[
     ("The update was installed but the restart failed: {error}. Start the program manually.", "업데이트는 설치했지만 다시 시작하지 못했습니다: {error}. 프로그램을 직접 실행하세요."),
     ("Theme", "테마"),
     ("Theme and how the translation is shown", "테마와 번역 표시 방식"),
+    ("This release has no build for your system", "이 릴리스에는 사용 중인 시스템용 빌드가 없습니다"),
     ("Timeout, s", "제한 시간(초)"),
     ("Token", "토큰"),
     ("Too many requests, try again later", "요청이 너무 많음, 잠시 후 다시 시도하세요"),

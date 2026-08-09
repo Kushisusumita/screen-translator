@@ -9,11 +9,13 @@
 //! swapped between being written and being run; and a `%` anywhere in the
 //! install path breaks batch expansion.
 //!
-//! Windows lets you rename a *running* executable, which removes the need for a
-//! helper script entirely. The new build is placed next to the old one, the old
-//! one is renamed out of the way, the new one takes its name, and the process
-//! restarts. Every step is reversible until the last, and the leftover is
-//! cleaned up on the next launch.
+//! Renaming a *running* executable is allowed on every platform this ships to
+//! — Windows keeps the open handle with the file, and on Unix the process
+//! holds the inode — which removes the need for a helper script entirely. The
+//! new build is placed next to the old one, the old one is renamed out of the
+//! way, the new one takes its name, and the caller restarts. Every step is
+//! reversible until the last, and the leftover is cleaned up on the next
+//! launch.
 
 use std::path::{Path, PathBuf};
 
@@ -112,8 +114,8 @@ pub async fn download_and_apply(
     let retired = PathBuf::from(format!("{}{OLD_SUFFIX}", current.to_string_lossy()));
     let _ = std::fs::remove_file(&retired);
 
-    // Renaming a running executable is allowed on Windows; the open handle
-    // follows the file.
+    // Allowed while the program is running: Windows lets the open handle
+    // follow the file, and on Unix the running process keeps the inode.
     if let Err(e) = std::fs::rename(&current, &retired) {
         let _ = std::fs::remove_file(&staged);
         return Err(

@@ -43,10 +43,6 @@ use result::{ResultAction, ResultUi, Stage};
 /// belongs to a capture the user has already replaced, and is dropped.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
-/// Where a platform without a prebuilt binary is sent instead of downloading
-/// one it cannot run.
-const RELEASES_PAGE: &str = "https://github.com/Kushisusumita/screen-translator/releases/latest";
-
 #[derive(Debug, Clone)]
 enum UpdateState {
     Checking,
@@ -848,11 +844,6 @@ impl App {
                     repaint.request_repaint();
                 });
             }
-        }
-        if out.open_release_page {
-            // The release carries a Windows binary only, so everywhere else
-            // the honest action is to show the page and let the user decide.
-            ctx.open_url(egui::OpenUrl::new_tab(RELEASES_PAGE));
         }
         if out.test_ai && !self.ai_test_running {
             self.start_ai_test();
