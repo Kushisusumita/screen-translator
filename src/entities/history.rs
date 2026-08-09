@@ -12,6 +12,13 @@ use crate::entities::settings::EngineKind;
 
 #[derive(Debug, Clone)]
 pub struct HistoryEntry {
+    /// Identifies this entry for as long as the session lasts.
+    ///
+    /// The settings window remembers which entry the user expanded, and new
+    /// translations are pushed onto the *front* of the list — so a position
+    /// is not an identity: one capture taken with the page open would shift
+    /// every index and silently rebind the open row to its neighbour.
+    pub id: u64,
     pub original: String,
     pub translated: String,
     pub source: Language,
@@ -36,6 +43,14 @@ impl History {
     pub fn set_limit(&mut self, limit: usize) {
         self.limit = limit.max(1);
         self.trim();
+    }
+
+    /// Hands out the ids. Monotonic for the life of the process; the history
+    /// itself never outlives it.
+    pub fn next_id() -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        NEXT.fetch_add(1, Ordering::Relaxed)
     }
 
     pub fn push(&mut self, entry: HistoryEntry) {
@@ -84,12 +99,36 @@ mod tests {
 
     fn entry(original: &str) -> HistoryEntry {
         HistoryEntry {
+            id: History::next_id(),
             original: original.into(),
             translated: format!("<{original}>"),
             source: Language::En,
             target: Language::Ru,
             engine: EngineKind::Google,
         }
+    }
+
+    #[test]
+    fn an_entry_keeps_its_identity_as_the_list_shifts() {
+        // The settings window remembers an expanded entry by id. Pushing moves
+        // everything down a place, so a position would come to mean a different
+        // entry — which is what this guards.
+        let mut h = History::new(10);
+        h.push(entry("first"));
+        let first_id = h.iter().next().expect("pushed").id;
+
+        h.push(entry("second"));
+        assert_eq!(h.iter().next().expect("pushed").original, "second");
+
+        let found = h.iter().find(|e| e.id == first_id).expect("still there");
+        assert_eq!(found.original, "first");
+    }
+
+    #[test]
+    fn ids_are_never_reused() {
+        let a = History::next_id();
+        let b = History::next_id();
+        assert_ne!(a, b);
     }
 
     #[test]

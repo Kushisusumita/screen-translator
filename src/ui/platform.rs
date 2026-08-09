@@ -9,6 +9,7 @@
 //! frameless group per section with faint dividers inside it. That is a
 //! deliberate departure, applied identically on both platforms.
 
+use crate::shared::i18n::t;
 use crate::entities::settings::{MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,11 +143,8 @@ impl Platform {
     }
 
     /// The space bar, named the way the rest of the OS names it.
-    pub const fn space_key(self) -> &'static str {
-        match self {
-            Platform::Windows => "Пробел",
-            Platform::MacOs => "Space",
-        }
+    pub fn space_key(self) -> &'static str {
+        t("Space")
     }
 
     /// Candidate UI font files, best first. Missing files are skipped.
@@ -221,10 +219,16 @@ impl Platform {
                 (r"C:\Windows\Fonts\YuGothR.ttc", 0.10),
                 (r"C:\Windows\Fonts\YuGothM.ttc", 0.10),
                 (r"C:\Windows\Fonts\msgothic.ttc", 0.10),
+                // Simplified Chinese and Korean, for the interface language as
+                // much as for translated text: neither is covered by the
+                // Japanese faces above.
+                (r"C:\Windows\Fonts\msyh.ttc", 0.10),
+                (r"C:\Windows\Fonts\malgun.ttf", 0.10),
             ],
             Platform::MacOs => &[
                 ("/System/Library/Fonts/Hiragino Sans GB.ttc", 0.06),
                 ("/System/Library/Fonts/PingFang.ttc", 0.06),
+                ("/System/Library/Fonts/AppleSDGothicNeo.ttc", 0.06),
             ],
         }
     }

@@ -1,3 +1,4 @@
+use crate::shared::i18n::t;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -84,10 +85,10 @@ impl Language {
         }
     }
 
-    /// Two-letter badge for the result popup: `EN`, `RU`, `АВТО`.
+    /// Two-letter badge for the result popup: `EN`, `RU`, `AUTO`.
     pub fn badge(self) -> &'static str {
         match self {
-            Language::Auto => "АВТО",
+            Language::Auto => t("AUTO"),
             other => match other.code() {
                 "en" => "EN",
                 "ru" => "RU",
@@ -164,50 +165,50 @@ impl Language {
         }
     }
 
-    /// The interface is Russian, so the pickers show Russian names.
+    /// The name the pickers show, in the interface language.
     pub fn name_ru(self) -> &'static str {
         use Language::*;
         match self {
-            Auto => "Определять автоматически",
-            En => "Английский",
-            Ru => "Русский",
-            Uk => "Украинский",
-            De => "Немецкий",
-            Fr => "Французский",
-            Es => "Испанский",
-            It => "Итальянский",
-            Pt => "Португальский",
-            Pl => "Польский",
-            Nl => "Нидерландский",
-            Tr => "Турецкий",
-            Cs => "Чешский",
-            Sv => "Шведский",
-            El => "Греческий",
-            Ro => "Румынский",
-            Hu => "Венгерский",
-            Fi => "Финский",
-            Da => "Датский",
-            Bg => "Болгарский",
-            Sr => "Сербский",
-            Kk => "Казахский",
-            He => "Иврит",
-            Ar => "Арабский",
-            Fa => "Персидский",
-            Hi => "Хинди",
-            Th => "Тайский",
-            Vi => "Вьетнамский",
-            Id => "Индонезийский",
-            Zh => "Китайский",
-            Ja => "Японский",
-            Ko => "Корейский",
+            Auto => t("Detect automatically"),
+            En => t("English"),
+            Ru => t("Russian"),
+            Uk => t("Ukrainian"),
+            De => t("German"),
+            Fr => t("French"),
+            Es => t("Spanish"),
+            It => t("Italian"),
+            Pt => t("Portuguese"),
+            Pl => t("Polish"),
+            Nl => t("Dutch"),
+            Tr => t("Turkish"),
+            Cs => t("Czech"),
+            Sv => t("Swedish"),
+            El => t("Greek"),
+            Ro => t("Romanian"),
+            Hu => t("Hungarian"),
+            Fi => t("Finnish"),
+            Da => t("Danish"),
+            Bg => t("Bulgarian"),
+            Sr => t("Serbian"),
+            Kk => t("Kazakh"),
+            He => t("Hebrew"),
+            Ar => t("Arabic"),
+            Fa => t("Persian"),
+            Hi => t("Hindi"),
+            Th => t("Thai"),
+            Vi => t("Vietnamese"),
+            Id => t("Indonesian"),
+            Zh => t("Chinese"),
+            Ja => t("Japanese"),
+            Ko => t("Korean"),
         }
     }
 
-    /// Shorter form for a narrow picker, where "Определять автоматически" does
+    /// Shorter form for a narrow picker, where "Detect automatically" does
     /// not fit.
     pub fn short_ru(self) -> &'static str {
         match self {
-            Language::Auto => "Авто",
+            Language::Auto => t("Auto"),
             other => other.name_ru(),
         }
     }
@@ -285,7 +286,7 @@ mod tests {
 
     #[test]
     fn the_short_form_only_differs_for_auto() {
-        assert_eq!(Language::Auto.short_ru(), "Авто");
+        assert_eq!(Language::Auto.short_ru(), crate::shared::i18n::t("Auto"));
         assert_eq!(Language::Ru.short_ru(), Language::Ru.name_ru());
     }
 

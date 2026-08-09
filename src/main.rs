@@ -13,6 +13,7 @@ use egui::ViewportBuilder;
 
 use app::App;
 use features::settings::ui::Section;
+use shared::i18n::t;
 use shared::logging::{self, LogConfig};
 
 /// Command line. Deliberately tiny — this is a tray app, not a CLI.
@@ -42,14 +43,20 @@ fn parse_args() -> Args {
             "--help" | "-h" => {
                 println!("Sakura Screen Translator {}", env!("CARGO_PKG_VERSION"));
                 println!();
-                println!("Запускается в системном трее.");
+                println!("{}", t("Runs in the system tray."));
                 println!();
-                println!("  --settings, -s [раздел]   открыть параметры (general, keys,");
-                println!("                            languages, engine, appearance, logs, about)");
-                println!("  --help, -h       эта справка");
+                println!(
+                    "  --settings, -s [page]     {}",
+                    t("open settings on a given page")
+                );
+                println!("                            (general, keys, languages, engine, appearance, logs, about)");
+                println!("  --help, -h                {}", t("show this help"));
                 std::process::exit(0);
             }
-            other => eprintln!("Неизвестный аргумент: {other}"),
+            other => eprintln!(
+                "{}",
+                t("Unknown argument: {argument}").replace("{argument}", other)
+            ),
         }
     }
     args
@@ -75,6 +82,17 @@ fn main() -> eframe::Result<()> {
     let _log_guard = logging::init(&log_cfg);
 
     let settings = features::settings::load_settings();
+
+    // Before anything is drawn, and before the first error message can be
+    // built: the language decides what every string in the process reads as.
+    // No preference means follow the OS, and an OS we have no translation for
+    // means English.
+    let language = settings
+        .ui_language
+        .or_else(shared::i18n::detect_system)
+        .unwrap_or(shared::i18n::Lang::En);
+    shared::i18n::set(language);
+    tracing::info!(language = language.code(), "Interface language");
 
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),

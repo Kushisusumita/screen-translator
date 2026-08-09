@@ -17,6 +17,7 @@
 use egui::{Color32, Context, FontData, FontDefinitions, FontFamily, Rounding, Stroke, Visuals};
 use tracing::debug;
 
+use crate::shared::i18n::t;
 use super::platform::{Metrics, Platform};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -30,9 +31,9 @@ pub enum ThemeMode {
 impl ThemeMode {
     pub fn label(self) -> &'static str {
         match self {
-            ThemeMode::System => "Как в системе",
-            ThemeMode::Light => "Светлая",
-            ThemeMode::Dark => "Тёмная",
+            ThemeMode::System => t("Match the system"),
+            ThemeMode::Light => t("Light"),
+            ThemeMode::Dark => t("Dark"),
         }
     }
 
@@ -451,30 +452,45 @@ pub fn build_fonts() -> FontDefinitions {
         debug!(font = %name, "Monospace font loaded");
         fonts.font_data.insert("mono".to_owned(), data);
     }
-    if let Some((name, data)) = load_first_weighted(platform.cjk_font_candidates()) {
-        debug!(font = %name, "CJK fallback loaded");
-        fonts.font_data.insert("cjk".to_owned(), data);
-    }
+    // Every face we can find, not the first one: no single CJK font covers
+    // Japanese, Chinese *and* Korean. Loading only the first meant a Korean
+    // interface rendered as a window full of tofu, because the Japanese face
+    // that happened to be first has no hangul in it.
+    let cjk: Vec<String> = load_all_weighted(platform.cjk_font_candidates())
+        .into_iter()
+        .enumerate()
+        .map(|(i, (name, data))| {
+            let key = format!("cjk{i}");
+            debug!(font = %name, "CJK fallback loaded");
+            fonts.font_data.insert(key.clone(), data);
+            key
+        })
+        .collect();
 
     let has_ui = fonts.font_data.contains_key("ui");
     let has_mono = fonts.font_data.contains_key("mono");
-    let has_cjk = fonts.font_data.contains_key("cjk");
 
     let prop = fonts.families.entry(FontFamily::Proportional).or_default();
     if has_ui {
         prop.insert(0, "ui".to_owned());
     }
-    if has_cjk {
-        prop.push("cjk".to_owned());
+    // A CJK interface language wants these faces *first*: the Latin UI font
+    // has no kana, hanzi or hangul, so leaving it in front means a miss on
+    // every glyph, and the few characters it does cover come out in a
+    // different face from the rest of the line.
+    if crate::shared::i18n::current().needs_cjk() {
+        for (i, key) in cjk.iter().enumerate() {
+            prop.insert(i, key.clone());
+        }
+    } else {
+        prop.extend(cjk.iter().cloned());
     }
 
     let mono = fonts.families.entry(FontFamily::Monospace).or_default();
     if has_mono {
         mono.insert(0, "mono".to_owned());
     }
-    if has_cjk {
-        mono.push("cjk".to_owned());
-    }
+    mono.extend(cjk.iter().cloned());
 
     fonts
 }
@@ -488,15 +504,20 @@ fn load_first(paths: &[&str]) -> Option<(String, FontData)> {
     None
 }
 
-fn load_first_weighted(paths: &[(&str, f32)]) -> Option<(String, FontData)> {
+/// Every candidate that exists on this machine, in the order given.
+///
+/// The scripts are split across several files on every platform, so this
+/// takes all of them and lets egui walk the list per glyph.
+fn load_all_weighted(paths: &[(&str, f32)]) -> Vec<(String, FontData)> {
+    let mut loaded = Vec::new();
     for (path, y_offset) in paths {
         if let Ok(bytes) = std::fs::read(path) {
             let mut fd = FontData::from_owned(bytes);
             fd.tweak.y_offset_factor = *y_offset;
-            return Some(((*path).to_string(), fd));
+            loaded.push(((*path).to_string(), fd));
         }
     }
-    None
+    loaded
 }
 
 /// Type ramp. Kept in one place so a size change lands everywhere at once.

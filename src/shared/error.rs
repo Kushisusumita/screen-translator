@@ -1,5 +1,7 @@
 use std::fmt;
 
+use crate::shared::i18n::t;
+
 #[derive(Debug)]
 pub enum AppError {
     Io(std::io::Error),
@@ -17,16 +19,16 @@ pub enum AppError {
 impl fmt::Display for AppError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            AppError::Io(e) => write!(f, "IO error: {e}"),
-            AppError::Reqwest(e) => write!(f, "HTTP error: {e}"),
-            AppError::Json(e) => write!(f, "JSON error: {e}"),
-            AppError::Toml(e) => write!(f, "TOML parse error: {e}"),
-            AppError::TomlSer(e) => write!(f, "TOML serialize error: {e}"),
+            AppError::Io(e) => write!(f, "{}: {e}", t("IO error")),
+            AppError::Reqwest(e) => write!(f, "{}: {e}", t("HTTP error")),
+            AppError::Json(e) => write!(f, "{}: {e}", t("JSON error")),
+            AppError::Toml(e) => write!(f, "{}: {e}", t("TOML parse error")),
+            AppError::TomlSer(e) => write!(f, "{}: {e}", t("TOML serialize error")),
             #[cfg(windows)]
-            AppError::Windows(e) => write!(f, "Windows API error: {e}"),
-            AppError::Image(e) => write!(f, "Image error: {e}"),
-            AppError::Clipboard(e) => write!(f, "Clipboard error: {e}"),
-            AppError::Other(s) => write!(f, "Error: {s}"),
+            AppError::Windows(e) => write!(f, "{}: {e}", t("Windows API error")),
+            AppError::Image(e) => write!(f, "{}: {e}", t("Image error")),
+            AppError::Clipboard(e) => write!(f, "{}: {e}", t("Clipboard error")),
+            AppError::Other(s) => write!(f, "{}: {s}", t("Error")),
         }
     }
 }

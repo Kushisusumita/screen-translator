@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::entities::language::Language;
+use crate::shared::i18n::t;
+use crate::shared::i18n::Lang;
 use crate::shared::secret::Secret;
 use crate::ui::theme::ThemeMode;
 use crate::ui::Platform;
@@ -56,7 +58,7 @@ impl Hotkey {
     /// `Alt+Shift+T` on Windows, `⌥⇧T` on macOS.
     pub fn display(&self) -> String {
         if !self.is_bound() {
-            return "не задано".to_string();
+            return t("Not set").to_string();
         }
         Platform::current().format_hotkey(self.modifiers, vk_name(self.key))
     }
@@ -189,10 +191,10 @@ pub enum HotkeyAction {
 impl HotkeyAction {
     pub fn label(self) -> &'static str {
         match self {
-            HotkeyAction::Region => "Перевести область",
-            HotkeyAction::Window => "Перевести окно",
-            HotkeyAction::FullScreen => "Перевести весь экран",
-            HotkeyAction::Repeat => "Повторить последний захват",
+            HotkeyAction::Region => t("Translate a region"),
+            HotkeyAction::Window => t("Translate a window"),
+            HotkeyAction::FullScreen => t("Translate the whole screen"),
+            HotkeyAction::Repeat => t("Repeat the last capture"),
         }
     }
 
@@ -219,18 +221,18 @@ pub enum CaptureMode {
 impl CaptureMode {
     pub fn label(self) -> &'static str {
         match self {
-            CaptureMode::Region => "Область",
-            CaptureMode::Window => "Окно",
-            CaptureMode::FullScreen => "Весь экран",
+            CaptureMode::Region => t("Region"),
+            CaptureMode::Window => t("Window"),
+            CaptureMode::FullScreen => t("Full screen"),
         }
     }
 
     /// Longer form for the tray menu, where the label has to say what it does.
     pub fn label_menu(self) -> &'static str {
         match self {
-            CaptureMode::Region => "Перевести область",
-            CaptureMode::Window => "Перевести окно",
-            CaptureMode::FullScreen => "Перевести весь экран",
+            CaptureMode::Region => t("Translate a region"),
+            CaptureMode::Window => t("Translate a window"),
+            CaptureMode::FullScreen => t("Translate the whole screen"),
         }
     }
 
@@ -269,21 +271,21 @@ pub enum ResultView {
 impl ResultView {
     pub fn label(self) -> &'static str {
         match self {
-            ResultView::Popup => "Popup у выделения",
-            ResultView::Inline => "Поверх оригинала",
-            ResultView::Window => "Отдельное окно",
-            ResultView::None => "Не показывать",
+            ResultView::Popup => t("Popup by the selection"),
+            ResultView::Inline => t("Over the original"),
+            ResultView::Window => t("Separate window"),
+            ResultView::None => t("Don't show"),
         }
     }
 
     pub fn description(self) -> &'static str {
         match self {
-            ResultView::Popup => "Карточка с оригиналом и переводом рядом с захваченной областью.",
+            ResultView::Popup => t("A card with the original and the translation next to the captured area."),
             ResultView::Inline => {
-                "Перевод рисуется на месте оригинала — удобно для длинных абзацев."
+                t("The translation is drawn in place of the original — handy for long paragraphs.")
             }
-            ResultView::Window => "Окно с двумя колонками, можно закрепить поверх всех окон.",
-            ResultView::None => "Результат только копируется в буфер обмена.",
+            ResultView::Window => t("A two-column window that can be kept on top of other windows."),
+            ResultView::None => t("The result is only copied to the clipboard."),
         }
     }
 
@@ -409,19 +411,19 @@ impl EngineSettings {
 
     pub fn status(&self, kind: EngineKind) -> &'static str {
         match kind {
-            EngineKind::Yandex | EngineKind::Google => "без ключа",
+            EngineKind::Yandex | EngineKind::Google => t("No key needed"),
             EngineKind::DeepL => {
                 if self.deepl_key.is_empty() {
-                    "нужен ключ"
+                    t("Key required")
                 } else {
-                    "API-ключ"
+                    t("API key")
                 }
             }
             EngineKind::Ai => {
                 if self.ai_config.is_usable() {
-                    "готов"
+                    t("Ready")
                 } else {
-                    "нужен ключ"
+                    t("Key required")
                 }
             }
         }
@@ -462,7 +464,7 @@ pub enum AiProtocol {
 impl AiProtocol {
     pub fn label(self) -> &'static str {
         match self {
-            AiProtocol::OpenAi => "OpenAI-совместимый",
+            AiProtocol::OpenAi => t("OpenAI-compatible"),
             AiProtocol::Anthropic => "Anthropic Messages",
             AiProtocol::Gemini => "Google Gemini",
         }
@@ -486,6 +488,14 @@ pub struct AiPreset {
     pub base_url: &'static str,
     pub model: &'static str,
     pub needs_key: bool,
+}
+
+impl AiPreset {
+    /// What the chip says. `name` doubles as the stored identity of the preset,
+    /// so it stays English and only the display goes through the tables.
+    pub fn display_name(&self) -> &'static str {
+        t(self.name)
+    }
 }
 
 pub const AI_PRESETS: &[AiPreset] = &[
@@ -539,14 +549,14 @@ pub const AI_PRESETS: &[AiPreset] = &[
         needs_key: true,
     },
     AiPreset {
-        name: "Ollama (локально)",
+        name: "Ollama (local)",
         protocol: AiProtocol::OpenAi,
         base_url: "http://localhost:11434/v1",
         model: "qwen2.5:7b",
         needs_key: false,
     },
     AiPreset {
-        name: "LM Studio (локально)",
+        name: "LM Studio (local)",
         protocol: AiProtocol::OpenAi,
         base_url: "http://localhost:1234/v1",
         model: "local-model",
@@ -696,7 +706,7 @@ pub struct Settings {
     /// Run without a tray icon, reachable only by hotkey. Straight from the
     /// Windows design, where Settings offers exactly this.
     pub hide_tray_icon: bool,
-    /// Show the Область/Окно/Весь экран switcher during capture.
+    /// Show the Region / Window / Full screen switcher during capture.
     pub show_mode_hud: bool,
     pub play_sound: bool,
     /// Keep the result window above everything else.
@@ -717,6 +727,11 @@ pub struct Settings {
     /// recorded at all — the list is a record of everything the user pointed the
     /// tool at, and some people would rather it did not exist even in memory.
     pub keep_history: bool,
+    /// Interface language. `None` follows the OS, which is what a fresh
+    /// install does — someone running a Japanese system did not ask for an
+    /// English app.
+    #[serde(default)]
+    pub ui_language: Option<Lang>,
     pub history_limit: usize,
 }
 
@@ -741,6 +756,7 @@ impl Default for Settings {
             notify_about_updates: true,
             notified_version: String::new(),
             keep_history: true,
+            ui_language: None,
             history_limit: 50,
         }
     }

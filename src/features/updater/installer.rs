@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 use super::checker::url_is_allowed;
+use crate::shared::i18n::t;
 
 /// Sanity bounds for the download. The real binary is a few megabytes; anything
 /// far outside that is not what we asked for.
@@ -30,14 +31,17 @@ const OLD_SUFFIX: &str = ".old";
 
 pub async fn download_and_apply(url: &str) -> Result<(), String> {
     if !url_is_allowed(url) {
-        return Err("ссылка на обновление ведёт не на GitHub — установка отменена".into());
+        return Err(
+            t("The update link does not point to GitHub — the install was cancelled").into(),
+        );
     }
 
-    let current =
-        std::env::current_exe().map_err(|e| format!("не найден путь к программе: {e}"))?;
+    let current = std::env::current_exe().map_err(|e| {
+        t("Could not find the program path: {error}").replace("{error}", &e.to_string())
+    })?;
     let dir = current
         .parent()
-        .ok_or_else(|| "не определить папку установки".to_string())?
+        .ok_or_else(|| t("Could not determine the install folder").to_string())?
         .to_path_buf();
 
     // Fail before downloading if the install directory is read-only, rather
@@ -55,16 +59,17 @@ pub async fn download_and_apply(url: &str) -> Result<(), String> {
         .get(url)
         .send()
         .await
-        .map_err(|e| format!("не удалось скачать: {e}"))?;
+        .map_err(|e| t("Download failed: {error}").replace("{error}", &e.to_string()))?;
 
     if !resp.status().is_success() {
-        return Err(format!("сервер ответил HTTP {}", resp.status()));
+        return Err(
+            t("The server returned HTTP {status}").replace("{status}", &resp.status().to_string())
+        );
     }
 
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| format!("обрыв загрузки: {e}"))?;
+    let bytes = resp.bytes().await.map_err(|e| {
+        t("The download was interrupted: {error}").replace("{error}", &e.to_string())
+    })?;
 
     validate_payload(&bytes)?;
 
@@ -72,7 +77,8 @@ pub async fn download_and_apply(url: &str) -> Result<(), String> {
         "{}.new",
         current.file_name().unwrap_or_default().to_string_lossy()
     ));
-    std::fs::write(&staged, &bytes).map_err(|e| format!("не удалось записать файл: {e}"))?;
+    std::fs::write(&staged, &bytes)
+        .map_err(|e| t("Could not write the file: {error}").replace("{error}", &e.to_string()))?;
 
     let retired = PathBuf::from(format!("{}{OLD_SUFFIX}", current.to_string_lossy()));
     let _ = std::fs::remove_file(&retired);
@@ -81,17 +87,17 @@ pub async fn download_and_apply(url: &str) -> Result<(), String> {
     // follows the file.
     if let Err(e) = std::fs::rename(&current, &retired) {
         let _ = std::fs::remove_file(&staged);
-        return Err(format!(
-            "не удалось освободить файл программы: {e}. \
-             Возможно, нужны права администратора."
-        ));
+        return Err(t(
+            "Could not free the program file: {error}. You may need administrator rights.",
+        )
+        .replace("{error}", &e.to_string()));
     }
 
     if let Err(e) = std::fs::rename(&staged, &current) {
         // Put the working build back before giving up.
         let _ = std::fs::rename(&retired, &current);
         let _ = std::fs::remove_file(&staged);
-        return Err(format!("не удалось установить обновление: {e}"));
+        return Err(t("Could not install the update: {error}").replace("{error}", &e.to_string()));
     }
 
     info!("Update installed, restarting");
@@ -99,9 +105,10 @@ pub async fn download_and_apply(url: &str) -> Result<(), String> {
         Ok(_) => {
             std::process::exit(0);
         }
-        Err(e) => Err(format!(
-            "обновление установлено, но перезапуск не удался: {e}. Запустите программу вручную."
-        )),
+        Err(e) => Err(t(
+            "The update was installed but the restart failed: {error}. Start the program manually.",
+        )
+        .replace("{error}", &e.to_string())),
     }
 }
 
@@ -142,20 +149,18 @@ const EXECUTABLE_MAGICS: &[&[u8]] = &[&[0x7F, b'E', b'L', b'F']];
 fn validate_payload(bytes: &[u8]) -> Result<(), String> {
     validate_size(bytes.len())?;
     if !EXECUTABLE_MAGICS.iter().any(|m| bytes.starts_with(m)) {
-        return Err("скачанный файл не является программой".into());
+        return Err(t("The downloaded file is not a program").into());
     }
     Ok(())
 }
 
 fn validate_size(len: usize) -> Result<(), String> {
     if len < MIN_SIZE {
-        return Err(format!(
-            "скачано всего {} КБ — это не программа",
-            len / 1024
-        ));
+        return Err(t("Only {size} KB was downloaded — that is not a program")
+            .replace("{size}", &(len / 1024).to_string()));
     }
     if len > MAX_SIZE {
-        return Err("файл обновления неправдоподобно велик".into());
+        return Err(t("The update file is implausibly large").into());
     }
     Ok(())
 }
@@ -167,11 +172,9 @@ fn check_writable(dir: &Path) -> Result<(), String> {
             let _ = std::fs::remove_file(&probe);
             Ok(())
         }
-        Err(e) => Err(format!(
-            "нет прав на запись в {}: {e}. Переустановите программу в папку пользователя \
-             или запустите обновление от администратора.",
-            dir.display()
-        )),
+        Err(e) => Err(t("No write permission for {path}: {error}. Reinstall the program into a user folder or run the update as administrator.")
+            .replace("{path}", &dir.display().to_string())
+            .replace("{error}", &e.to_string())),
     }
 }
 
@@ -197,7 +200,10 @@ mod tests {
     fn an_html_error_page_is_rejected() {
         let page = b"<!DOCTYPE html><html><body>Sign in</body></html>".repeat(20_000);
         let err = validate_payload(&page).unwrap_err();
-        assert!(err.contains("не является программой"), "{err}");
+        assert!(
+            err.contains(t("The downloaded file is not a program")),
+            "{err}"
+        );
     }
 
     #[test]
@@ -209,7 +215,10 @@ mod tests {
     fn an_absurdly_large_payload_is_rejected() {
         // Size is checked on the length alone, so this needs no 200 MB buffer.
         let err = validate_size(MAX_SIZE + 1).unwrap_err();
-        assert!(err.contains("велик"), "{err}");
+        assert!(
+            err.contains(t("The update file is implausibly large")),
+            "{err}"
+        );
         assert!(validate_size(MIN_SIZE).is_ok());
     }
 

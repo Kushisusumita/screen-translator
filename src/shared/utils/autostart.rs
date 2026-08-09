@@ -1,4 +1,5 @@
 use crate::shared::error::AppError;
+use crate::shared::i18n::t;
 
 #[cfg(windows)]
 const AUTOSTART_VALUE: &str = "SakuraScreenTranslator";
@@ -33,13 +34,23 @@ pub fn set_autostart(enabled: bool, exe_path: &str) -> Result<(), AppError> {
             r"Software\Microsoft\Windows\CurrentVersion\Run",
             KEY_SET_VALUE,
         )
-        .map_err(|e| AppError::Other(format!("не открыть ключ автозапуска: {e}")))?;
+        .map_err(|e| {
+            AppError::Other(
+                t("Could not open the autostart registry key: {error}")
+                    .replace("{error}", &e.to_string()),
+            )
+        })?;
 
     let _ = key.delete_value(LEGACY_VALUE);
 
     if enabled {
         key.set_value(AUTOSTART_VALUE, &quote_command(exe_path))
-            .map_err(|e| AppError::Other(format!("не записать автозапуск: {e}")))?;
+            .map_err(|e| {
+                AppError::Other(
+                    t("Could not write the autostart entry: {error}")
+                        .replace("{error}", &e.to_string()),
+                )
+            })?;
     } else {
         // Absent is the desired state, so "not found" is success.
         let _ = key.delete_value(AUTOSTART_VALUE);
@@ -58,16 +69,26 @@ pub fn set_autostart(enabled: bool, exe_path: &str) -> Result<(), AppError> {
         // Absent is the desired state, so "not found" is success.
         if path.exists() {
             std::fs::remove_file(&path)
-                .map_err(|e| AppError::Other(format!("не удалить автозапуск: {e}")))?;
+                .map_err(|e| {
+                    AppError::Other(
+                        t("Could not remove the autostart entry: {error}")
+                            .replace("{error}", &e.to_string()),
+                    )
+                })?;
         }
         return Ok(());
     }
 
     let dir = path
         .parent()
-        .ok_or_else(|| AppError::Other("не найден каталог LaunchAgents".to_string()))?;
+        .ok_or_else(|| AppError::Other(t("Could not find the LaunchAgents folder").to_string()))?;
     std::fs::create_dir_all(dir)
-        .map_err(|e| AppError::Other(format!("не создать каталог LaunchAgents: {e}")))?;
+        .map_err(|e| {
+            AppError::Other(
+                t("Could not create the LaunchAgents folder: {error}")
+                    .replace("{error}", &e.to_string()),
+            )
+        })?;
 
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -92,7 +113,12 @@ pub fn set_autostart(enabled: bool, exe_path: &str) -> Result<(), AppError> {
     );
 
     std::fs::write(&path, plist)
-        .map_err(|e| AppError::Other(format!("не записать автозапуск: {e}")))?;
+        .map_err(|e| {
+            AppError::Other(
+                t("Could not write the autostart entry: {error}")
+                    .replace("{error}", &e.to_string()),
+            )
+        })?;
     Ok(())
 }
 
@@ -102,7 +128,7 @@ const LAUNCH_AGENT_LABEL: &str = "com.sakura.screen-translator";
 #[cfg(target_os = "macos")]
 fn launch_agent_path() -> Result<std::path::PathBuf, AppError> {
     let home = dirs::home_dir()
-        .ok_or_else(|| AppError::Other("не найден домашний каталог".to_string()))?;
+        .ok_or_else(|| AppError::Other(t("Could not find the home folder").to_string()))?;
     Ok(home
         .join("Library/LaunchAgents")
         .join(format!("{LAUNCH_AGENT_LABEL}.plist")))
@@ -122,20 +148,30 @@ fn xml_escape(s: &str) -> String {
 #[cfg(all(unix, not(target_os = "macos")))]
 pub fn set_autostart(enabled: bool, exe_path: &str) -> Result<(), AppError> {
     let dir = dirs::config_dir()
-        .ok_or_else(|| AppError::Other("не найден каталог настроек".to_string()))?
+        .ok_or_else(|| AppError::Other(t("Could not find the settings folder").to_string()))?
         .join("autostart");
     let path = dir.join("sakura-screen-translator.desktop");
 
     if !enabled {
         if path.exists() {
             std::fs::remove_file(&path)
-                .map_err(|e| AppError::Other(format!("не удалить автозапуск: {e}")))?;
+                .map_err(|e| {
+                    AppError::Other(
+                        t("Could not remove the autostart entry: {error}")
+                            .replace("{error}", &e.to_string()),
+                    )
+                })?;
         }
         return Ok(());
     }
 
     std::fs::create_dir_all(&dir)
-        .map_err(|e| AppError::Other(format!("не создать каталог автозапуска: {e}")))?;
+        .map_err(|e| {
+            AppError::Other(
+                t("Could not create the autostart folder: {error}")
+                    .replace("{error}", &e.to_string()),
+            )
+        })?;
 
     let entry = format!(
         "[Desktop Entry]\n\
@@ -148,7 +184,12 @@ pub fn set_autostart(enabled: bool, exe_path: &str) -> Result<(), AppError> {
     );
 
     std::fs::write(&path, entry)
-        .map_err(|e| AppError::Other(format!("не записать автозапуск: {e}")))?;
+        .map_err(|e| {
+            AppError::Other(
+                t("Could not write the autostart entry: {error}")
+                    .replace("{error}", &e.to_string()),
+            )
+        })?;
     Ok(())
 }
 

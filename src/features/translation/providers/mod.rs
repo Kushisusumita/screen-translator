@@ -17,6 +17,7 @@ use tracing::{debug, info, warn};
 use crate::entities::language::Language;
 use crate::entities::settings::{EngineKind, EngineSettings};
 use crate::shared::error::AppError;
+use crate::shared::i18n::t;
 use crate::shared::logging::redact;
 
 #[derive(Debug, Clone)]
@@ -81,7 +82,7 @@ pub async fn translate(
                     engine = kind.label(),
                     "Empty translation, trying next engine"
                 );
-                failures.push(format!("{}: пустой ответ", kind.label()));
+                failures.push(t("{engine}: empty response").replace("{engine}", kind.label()));
             }
             Err(e) => {
                 warn!(engine = kind.label(), error = %e, "Engine failed");
@@ -90,10 +91,9 @@ pub async fn translate(
         }
     }
 
-    Err(AppError::Other(format!(
-        "Не удалось перевести.\n\n{}",
-        failures.join("\n")
-    )))
+    Err(AppError::Other(
+        t("Translation failed.\n\n{reasons}").replace("{reasons}", &failures.join("\n")),
+    ))
 }
 
 async fn attempt(
@@ -117,12 +117,11 @@ fn no_engine_message(engines: &EngineSettings) -> String {
         .collect();
 
     if enabled_but_unconfigured.is_empty() {
-        "Все движки перевода выключены.\nВключите хотя бы один в Настройках → Движок.".to_string()
+        t("Every translation engine is turned off.\nTurn on at least one in Settings → Engine.")
+            .to_string()
     } else {
-        format!(
-            "Нет готового движка перевода.\n{} включён, но не настроен — не хватает API-ключа.\nНастройки → Движок.",
-            enabled_but_unconfigured.join(", ")
-        )
+        t("No translation engine is ready.\n{engines} is turned on but not configured — the API key is missing.\nSettings → Engine.")
+            .replace("{engines}", &enabled_but_unconfigured.join(", "))
     }
 }
 

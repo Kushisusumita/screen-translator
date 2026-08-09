@@ -1,5 +1,6 @@
 use tracing::info;
 
+use crate::shared::i18n::t;
 use crate::shared::logging::clip;
 
 #[derive(Debug, Clone)]
@@ -48,7 +49,7 @@ pub async fn check_for_update() -> Result<Option<UpdateInfo>, String> {
         .header("Accept", "application/vnd.github+json")
         .send()
         .await
-        .map_err(|e| format!("сеть недоступна: {e}"))?;
+        .map_err(|e| t("Network unavailable: {error}").replace("{error}", &e.to_string()))?;
 
     let status = resp.status();
     if status.as_u16() == 404 {
@@ -56,14 +57,14 @@ pub async fn check_for_update() -> Result<Option<UpdateInfo>, String> {
         return Ok(None);
     }
     if !status.is_success() {
-        return Err(format!("GitHub ответил HTTP {status}"));
+        return Err(t("GitHub returned HTTP {status}").replace("{status}", &status.to_string()));
     }
 
     let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
 
     let tag = json["tag_name"]
         .as_str()
-        .ok_or_else(|| "в релизе нет tag_name".to_string())?;
+        .ok_or_else(|| t("The release has no tag_name").to_string())?;
     let release_ver = tag.trim_start_matches('v');
     info!(
         latest = release_ver,
@@ -77,23 +78,23 @@ pub async fn check_for_update() -> Result<Option<UpdateInfo>, String> {
 
     let assets = json["assets"]
         .as_array()
-        .ok_or_else(|| "в релизе нет файлов".to_string())?;
+        .ok_or_else(|| t("The release has no files").to_string())?;
 
     let asset = assets
         .iter()
         .find(|a| a["name"].as_str().is_some_and(|n| n.ends_with(".exe")))
-        .ok_or_else(|| "в релизе нет .exe".to_string())?;
+        .ok_or_else(|| t("The release has no .exe file").to_string())?;
 
     let url = asset["browser_download_url"]
         .as_str()
-        .ok_or_else(|| "у файла нет ссылки".to_string())?
+        .ok_or_else(|| t("The file has no download link").to_string())?
         .to_string();
 
     if !url_is_allowed(&url) {
-        return Err(format!(
-            "ссылка на обновление ведёт не на GitHub, установка отменена: {}",
-            clip(&url, 120)
-        ));
+        return Err(t(
+            "The update link does not point to GitHub, so the install was cancelled: {url}",
+        )
+        .replace("{url}", clip(&url, 120)));
     }
 
     let size = asset["size"].as_u64().unwrap_or(0);

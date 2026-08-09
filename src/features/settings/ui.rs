@@ -18,6 +18,7 @@ use crate::entities::settings::{
     AiProtocol, CaptureMode, EngineKind, Hotkey, HotkeyAction, ResultView, Settings, AI_PRESETS,
     MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT,
 };
+use crate::shared::i18n::{t, Lang};
 use crate::shared::secret::{sealing_available, Secret};
 use crate::ui::platform::Platform;
 use crate::ui::theme::{text, ThemeMode};
@@ -54,18 +55,16 @@ impl Section {
     /// them to a word. Both designs show it, so both are here.
     fn label(self, platform: Platform) -> &'static str {
         match (self, platform) {
-            (Section::General, Platform::Windows) => "Общие",
-            (Section::General, Platform::MacOs) => "Основные",
-            (Section::Keys, Platform::Windows) => "Сочетания клавиш",
-            (Section::Keys, Platform::MacOs) => "Клавиши",
-            (Section::Languages, _) => "Языки",
-            (Section::Engine, Platform::Windows) => "Движок перевода",
-            (Section::Engine, Platform::MacOs) => "Движок",
-            (Section::Appearance, Platform::Windows) => "Внешний вид",
-            (Section::Appearance, Platform::MacOs) => "Вид",
-            (Section::History, _) => "История",
-            (Section::Logs, _) => "Журнал",
-            (Section::About, _) => "О программе",
+            (Section::General, _) => t("General"),
+            (Section::Keys, Platform::Windows) => t("Keyboard shortcuts"),
+            (Section::Keys, Platform::MacOs) => t("Keys"),
+            (Section::Languages, _) => t("Languages"),
+            (Section::Engine, Platform::Windows) => t("Translation engine"),
+            (Section::Engine, Platform::MacOs) => t("Engine"),
+            (Section::Appearance, _) => t("Appearance"),
+            (Section::History, _) => t("History"),
+            (Section::Logs, _) => t("Logs"),
+            (Section::About, _) => t("About"),
         }
     }
 
@@ -73,28 +72,28 @@ impl Section {
     /// the page.
     fn caption(self) -> &'static str {
         match self {
-            Section::General => "Поведение приложения и языковая пара",
-            Section::Keys => "Работают глобально, пока приложение запущено",
-            Section::Languages => "С какого и на какой язык переводить",
-            Section::Engine => "Порядок движков и ключи доступа",
-            Section::Appearance => "Оформление и способ показа перевода",
-            Section::History => "Последние переводы этого сеанса",
-            Section::Logs => "Что и как долго записывается на диск",
-            Section::About => "Версия, обновления и ссылки",
+            Section::General => t("App behaviour and the language pair"),
+            Section::Keys => t("Work system-wide while the app is running"),
+            Section::Languages => t("Which language to translate from and into"),
+            Section::Engine => t("Engine order and access keys"),
+            Section::Appearance => t("Theme and how the translation is shown"),
+            Section::History => t("Recent translations from this session"),
+            Section::Logs => t("What is written to disk, and for how long"),
+            Section::About => t("Version, updates and links"),
         }
     }
 
     /// Extra words the search should match beyond the visible label.
     fn keywords(self) -> &'static str {
         match self {
-            Section::General => "автозапуск буфер обмена трей значок уведомления история",
-            Section::Keys => "хоткей сочетание клавиши шорткат tab",
-            Section::Languages => "перевод язык исходный целевой",
-            Section::Engine => "yandex google deepl ai openai anthropic gemini ключ токен модель",
-            Section::Appearance => "тема светлая тёмная popup окно оформление",
-            Section::History => "история переводы последние очистить память",
-            Section::Logs => "лог журнал отладка приватность",
-            Section::About => "версия обновление лицензия автор донат",
+            Section::General => t("autostart clipboard tray icon notifications history"),
+            Section::Keys => t("hotkey shortcut keys keyboard tab"),
+            Section::Languages => t("translate language source target"),
+            Section::Engine => t("yandex google deepl ai openai anthropic gemini key token model"),
+            Section::Appearance => t("theme light dark popup window appearance"),
+            Section::History => t("history translations recent clear memory"),
+            Section::Logs => t("log journal debug privacy"),
+            Section::About => t("version update license author donate"),
         }
     }
 
@@ -186,7 +185,11 @@ pub struct SettingsUi {
     synced: bool,
     /// Which history entry is expanded, if any. A capture is often a whole
     /// paragraph, and one truncated line is no way to read it back.
-    open_entry: Option<usize>,
+    ///
+    /// Held by entry id rather than by position: new translations arrive at
+    /// the front of the list, so an index would quietly come to mean a
+    /// different entry the moment one did.
+    open_entry: Option<u64>,
 }
 
 impl Default for SettingsUi {
@@ -281,7 +284,7 @@ impl SettingsUi {
                 if shown == 0 {
                     ui.add_space(8.0);
                     ui.label(
-                        egui::RichText::new("Ничего не найдено")
+                        egui::RichText::new(t("Nothing found"))
                             .font(text::caption())
                             .color(theme.text_faint),
                     );
@@ -346,9 +349,9 @@ impl SettingsUi {
         out: &mut SettingsOutput,
     ) {
         let startup_label = if theme.platform == Platform::Windows {
-            "Запускать при входе в Windows"
+            t("Start when I sign in to Windows")
         } else {
-            "Запускать при входе в систему"
+            t("Start when I log in")
         };
 
         widgets::list(ui, theme, |ui| {
@@ -357,7 +360,7 @@ impl SettingsUi {
                 theme,
                 RowSpec::new(startup_label)
                     .icon(icons::startup)
-                    .subtitle("Приложение свернётся в область уведомлений"),
+                    .subtitle(t("Starts minimised to the notification area")),
                 |ui| {
                     if widgets::toggle(ui, theme, &mut s.launch_at_startup).changed() {
                         out.autostart_changed = true;
@@ -367,9 +370,9 @@ impl SettingsUi {
             widgets::row(
                 ui,
                 theme,
-                RowSpec::new("Скрывать значок в области уведомлений")
+                RowSpec::new(t("Hide the notification area icon"))
                     .icon(icons::bell)
-                    .subtitle("Доступ только по сочетанию клавиш"),
+                    .subtitle(t("Access by keyboard shortcut only")),
                 |ui| {
                     if widgets::toggle(ui, theme, &mut s.hide_tray_icon).changed() {
                         out.tray_changed = true;
@@ -379,9 +382,9 @@ impl SettingsUi {
             widgets::row(
                 ui,
                 theme,
-                RowSpec::new("Копировать перевод в буфер обмена")
+                RowSpec::new(t("Copy the translation to the clipboard"))
                     .icon(icons::clipboard)
-                    .subtitle("Сразу после распознавания"),
+                    .subtitle(t("As soon as the text is recognised")),
                 |ui| {
                     widgets::toggle(ui, theme, &mut s.copy_to_clipboard);
                 },
@@ -389,9 +392,19 @@ impl SettingsUi {
             widgets::row(
                 ui,
                 theme,
-                RowSpec::new("Языки перевода")
+                RowSpec::new(t("Interface language"))
                     .icon(icons::globe)
-                    .subtitle("Определять исходный автоматически"),
+                    .subtitle(t("Restart is not needed — the change applies at once")),
+                |ui| {
+                    ui_language_picker(ui, &mut s.ui_language);
+                },
+            );
+            widgets::row(
+                ui,
+                theme,
+                RowSpec::new(t("Translation languages"))
+                    .icon(icons::globe)
+                    .subtitle(t("Detect the source language automatically")),
                 |ui| {
                     let w = ((ui.available_width() - 26.0) / 2.0).clamp(84.0, 130.0);
                     compact_lang_picker(ui, "gen_tgt", w, &mut s.target_lang, false);
@@ -406,12 +419,12 @@ impl SettingsUi {
             widgets::row(
                 ui,
                 theme,
-                RowSpec::new("Движок перевода")
+                RowSpec::new(t("Translation engine"))
                     .icon(icons::swap)
                     .subtitle(&engine_summary(s))
                     .last(),
                 |ui| {
-                    if widgets::ghost_button(ui, theme, "Настроить").clicked() {
+                    if widgets::ghost_button(ui, theme, t("Configure")).clicked() {
                         self.section = Section::Engine;
                     }
                 },
@@ -423,11 +436,9 @@ impl SettingsUi {
                 ui,
                 theme,
                 theme.warning,
-                &format!(
-                    "Без значка окно параметров открывается только заново — запустите программу \
-                     с ключом --settings. Захват останется на {}.",
-                    s.hotkeys.region.display()
-                ),
+                &t("Without the icon this window can only be reopened by starting the app \
+                    with --settings. Capture stays on {hotkey}.")
+                .replace("{hotkey}", &s.hotkeys.region.display()),
             );
         }
         if s.produces_no_output() {
@@ -435,12 +446,12 @@ impl SettingsUi {
                 ui,
                 theme,
                 theme.warning,
-                "Ничего не произойдёт: результат не показывается и не копируется. \
-                 Включите копирование или выберите вид результата.",
+                t("Nothing will happen: the result is neither shown nor copied. \
+                   Turn on copying or pick a way to show the result."),
             );
         }
 
-        widgets::section_caption(ui, theme, "Режим захвата по умолчанию");
+        widgets::section_caption(ui, theme, t("Default capture mode"));
         widgets::list(ui, theme, |ui| {
             let modes = CaptureMode::all();
             for (i, mode) in modes.into_iter().enumerate() {
@@ -495,15 +506,14 @@ impl SettingsUi {
                 widgets::row(ui, theme, spec, |ui| {
                     // Right-to-left layout: the trailing control is added first.
                     if recording {
-                        if widgets::ghost_button(ui, theme, "Отмена").clicked() {
+                        if widgets::ghost_button(ui, theme, t("Cancel")).clicked() {
                             self.recording = None;
                         }
-                        widgets::hotkey_badge(ui, theme, "нажмите сочетание…", true);
+                        widgets::hotkey_badge(ui, theme, t("press a shortcut…"), true);
                     } else {
                         // Reading right to left, so this lays out as
-                        // badge · Изменить · Сбросить.
-                        if hk.is_bound() && widgets::ghost_button(ui, theme, "Сбросить").clicked()
-                        {
+                        // badge · Change · Clear.
+                        if hk.is_bound() && widgets::ghost_button(ui, theme, t("Clear")).clicked() {
                             *s.hotkeys.slot_mut(action) = Hotkey::unbound();
                             out.hotkeys_changed = true;
                         }
@@ -511,9 +521,9 @@ impl SettingsUi {
                             ui,
                             theme,
                             if hk.is_bound() {
-                                "Изменить"
+                                t("Change")
                             } else {
-                                "Задать"
+                                t("Set")
                             },
                         )
                         .clicked()
@@ -529,7 +539,7 @@ impl SettingsUi {
                             if widgets::hotkey_badge(ui, theme, &label, false).clicked() {
                                 self.recording = Some(action);
                             }
-                        } else if widgets::unbound_badge(ui, theme, "не задано").clicked() {
+                        } else if widgets::unbound_badge(ui, theme, t("not set")).clicked() {
                             self.recording = Some(action);
                         }
                     }
@@ -542,11 +552,9 @@ impl SettingsUi {
                 ui,
                 theme,
                 theme.warning,
-                &format!(
-                    "«{}» и «{}» назначены на одно сочетание — сработает только одно.",
-                    a.label(),
-                    b.label()
-                ),
+                &t("\"{first}\" and \"{second}\" are on the same shortcut — only one will fire.")
+                    .replace("{first}", a.label())
+                    .replace("{second}", b.label()),
             );
         }
         for action in info.rejected_hotkeys {
@@ -554,20 +562,19 @@ impl SettingsUi {
                 ui,
                 theme,
                 theme.danger,
-                &format!(
-                    "Сочетание для «{}» занято другой программой. Прежнее осталось в силе.",
-                    action.label()
-                ),
+                &t("The shortcut for \"{action}\" is taken by another program. \
+                    The previous one still applies.")
+                .replace("{action}", action.label()),
             );
         }
 
-        widgets::section_caption(ui, theme, "Во время захвата");
+        widgets::section_caption(ui, theme, t("While capturing"));
         widgets::list(ui, theme, |ui| {
             widgets::row(
                 ui,
                 theme,
-                RowSpec::new("Показывать переключатель режимов (Tab)")
-                    .subtitle("Область · Окно · Весь экран поверх затемнения"),
+                RowSpec::new(t("Show the mode switcher (Tab)"))
+                    .subtitle(t("Region · Window · Full screen over the dimmed overlay")),
                 |ui| {
                     widgets::toggle(ui, theme, &mut s.show_mode_hud);
                 },
@@ -575,8 +582,8 @@ impl SettingsUi {
             widgets::row(
                 ui,
                 theme,
-                RowSpec::new("Звук при распознавании")
-                    .subtitle("Короткий сигнал, когда область захвачена")
+                RowSpec::new(t("Sound when text is captured"))
+                    .subtitle(t("A short beep once the region is captured"))
                     .last(),
                 |ui| {
                     widgets::toggle(ui, theme, &mut s.play_sound);
@@ -587,7 +594,7 @@ impl SettingsUi {
         hint(
             ui,
             theme,
-            "Сочетание работает в любой программе, включая полноэкранные игры.",
+            t("Shortcuts work in any program, including full-screen games."),
         );
     }
 
@@ -605,7 +612,7 @@ impl SettingsUi {
                 ui.painter()
                     .circle_filled(rect.center(), 14.0, theme.hover_fill());
                 icons::swap(ui.painter(), rect.shrink(7.0), theme.text);
-                if resp.on_hover_text("Поменять местами").clicked()
+                if resp.on_hover_text(t("Swap")).clicked()
                     && s.source_lang != Language::Auto
                 {
                     std::mem::swap(&mut s.source_lang, &mut s.target_lang);
@@ -621,15 +628,16 @@ impl SettingsUi {
             hint(
                 ui,
                 theme,
-                "Исходный язык определяется по распознанному тексту — это точнее, \
-                 чем задавать его вручную.",
+                t("The source language is detected from the recognised text, which is more \
+                   accurate than setting it by hand."),
             );
         } else if s.source_lang == s.target_lang {
             notice(
                 ui,
                 theme,
                 theme.warning,
-                "Исходный и целевой языки совпадают — текст вернётся без изменений.",
+                t("The source and target languages are the same — the text will come back \
+                   unchanged."),
             );
         }
     }
@@ -647,7 +655,7 @@ impl SettingsUi {
         hint(
             ui,
             theme,
-            "Движки перебираются сверху вниз, пока один не ответит.",
+            t("Engines are tried from the top down until one answers."),
         );
         ui.add_space(6.0);
 
@@ -694,7 +702,7 @@ impl SettingsUi {
                 if i > 0 {
                     if ui
                         .small_button("↑")
-                        .on_hover_text("Выше в очереди")
+                        .on_hover_text(t("Move up the queue"))
                         .clicked()
                     {
                         move_up = Some(i);
@@ -719,8 +727,8 @@ impl SettingsUi {
             widgets::row(
                 ui,
                 theme,
-                RowSpec::new("API-ключ")
-                    .subtitle("Скрыт; ключ бесплатного тарифа оканчивается на :fx")
+                RowSpec::new(t("API key"))
+                    .subtitle(t("Hidden; a free-plan key ends in :fx"))
                     .last(),
                 |ui| {
                     if secret_field(ui, "deepl_key", &mut self.deepl_key, self.reveal_keys) {
@@ -731,12 +739,12 @@ impl SettingsUi {
             );
         });
 
-        widgets::section_caption(ui, theme, "AI-переводчик");
+        widgets::section_caption(ui, theme, t("AI translator"));
         hint(
             ui,
             theme,
-            "Любая модель с токеном: облачная или локальная. Выберите готовый вариант \
-             или задайте адрес и модель вручную.",
+            t("Any model with a token, cloud or local. Pick a preset or enter the address \
+               and model by hand."),
         );
         ui.add_space(6.0);
 
@@ -744,7 +752,7 @@ impl SettingsUi {
             ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
             for preset in AI_PRESETS {
                 let active = s.engines.ai_config.preset_name == preset.name;
-                if preset_chip(ui, theme, preset.name, active).clicked() {
+                if preset_chip(ui, theme, preset.display_name(), active).clicked() {
                     s.engines.ai_config.apply_preset(preset);
                     out.engines_changed = true;
                 }
@@ -756,7 +764,8 @@ impl SettingsUi {
             widgets::row(
                 ui,
                 theme,
-                RowSpec::new("Протокол").subtitle("Формат запросов, который понимает адрес"),
+                RowSpec::new(t("Protocol"))
+                    .subtitle(t("The request format the address understands")),
                 |ui| {
                     egui::ComboBox::from_id_salt("ai_protocol")
                         .selected_text(s.engines.ai_config.protocol.label())
@@ -780,7 +789,7 @@ impl SettingsUi {
             widgets::row(
                 ui,
                 theme,
-                RowSpec::new("Адрес API").subtitle("Базовый URL без завершающего пути"),
+                RowSpec::new(t("API address")).subtitle(t("Base URL without a trailing path")),
                 |ui| {
                     if ui
                         .add(
@@ -797,7 +806,7 @@ impl SettingsUi {
             widgets::row(
                 ui,
                 theme,
-                RowSpec::new("Модель").subtitle("Идентификатор модели у провайдера"),
+                RowSpec::new(t("Model")).subtitle(t("The model id at the provider")),
                 |ui| {
                     if ui
                         .add(
@@ -814,8 +823,8 @@ impl SettingsUi {
             widgets::row(
                 ui,
                 theme,
-                RowSpec::new("Токен")
-                    .subtitle("Скрыт и хранится зашифрованным; localhost ключа не требует"),
+                RowSpec::new(t("Token"))
+                    .subtitle(t("Hidden and stored encrypted; localhost needs no key")),
                 |ui| {
                     if secret_field(ui, "ai_key", &mut self.ai_key, self.reveal_keys) {
                         s.engines.ai_config.api_key = Secret::new(self.ai_key.trim());
@@ -826,7 +835,7 @@ impl SettingsUi {
             widgets::row(
                 ui,
                 theme,
-                RowSpec::new("Показывать ключи").subtitle("Снимает маскировку в полях выше"),
+                RowSpec::new(t("Show keys")).subtitle(t("Unmasks the fields above")),
                 |ui| {
                     widgets::toggle(ui, theme, &mut self.reveal_keys);
                 },
@@ -834,7 +843,7 @@ impl SettingsUi {
             widgets::row(
                 ui,
                 theme,
-                RowSpec::new("Температура").subtitle("Ниже — точнее и предсказуемее"),
+                RowSpec::new(t("Temperature")).subtitle(t("Lower is more literal and predictable")),
                 |ui| {
                     ui.add(
                         egui::DragValue::new(&mut s.engines.ai_config.temperature)
@@ -847,8 +856,8 @@ impl SettingsUi {
             widgets::row(
                 ui,
                 theme,
-                RowSpec::new("Таймаут, с")
-                    .subtitle("Сколько ждать ответа перед переходом к следующему движку")
+                RowSpec::new(t("Timeout, s"))
+                    .subtitle(t("How long to wait for an answer before moving to the next engine"))
                     .last(),
                 |ui| {
                     ui.add(
@@ -862,7 +871,7 @@ impl SettingsUi {
 
         ui.add_space(10.0);
         ui.label(
-            egui::RichText::new("Дополнительные указания модели")
+            egui::RichText::new(t("Extra instructions for the model"))
                 .font(text::small())
                 .color(theme.text_dim),
         );
@@ -871,7 +880,7 @@ impl SettingsUi {
             egui::TextEdit::multiline(&mut s.engines.ai_config.extra_instructions)
                 .desired_rows(2)
                 .desired_width(f32::INFINITY)
-                .hint_text("Например: обращайся на «ты», не переводи названия команд"),
+                .hint_text(t("For example: keep it informal, do not translate command names")),
         );
 
         ui.add_space(10.0);
@@ -879,8 +888,7 @@ impl SettingsUi {
             ui.add_enabled_ui(
                 !info.ai_test_running && s.engines.ai_config.is_usable(),
                 |ui| {
-                    if widgets::primary_button(ui, theme, "Проверить подключение").clicked()
-                    {
+                    if widgets::primary_button(ui, theme, t("Test connection")).clicked() {
                         out.test_ai = true;
                     }
                 },
@@ -903,18 +911,18 @@ impl SettingsUi {
                 ui,
                 theme,
                 theme.warning,
-                "На этой платформе токен сохраняется в файле настроек как есть — \
-                 шифрование ключей пока реализовано только для Windows.",
+                t("On this platform the token is saved in the settings file as-is — \
+                   key encryption is implemented for Windows only so far."),
             );
         }
 
-        widgets::section_caption(ui, theme, "Дополнительно");
+        widgets::section_caption(ui, theme, t("Advanced"));
         widgets::list(ui, theme, |ui| {
             widgets::row(
                 ui,
                 theme,
-                RowSpec::new("Yandex через браузер, если API не ответил")
-                    .subtitle("Запускает фоновый Chrome и добавляет несколько секунд")
+                RowSpec::new(t("Use Yandex through a browser when the API fails"))
+                    .subtitle(t("Runs Chrome in the background and adds a few seconds"))
                     .last(),
                 |ui| {
                     if widgets::toggle(ui, theme, &mut s.engines.yandex_headless_fallback).changed()
@@ -933,9 +941,9 @@ impl SettingsUi {
             widgets::row(
                 ui,
                 theme,
-                RowSpec::new("Оформление")
+                RowSpec::new(t("Theme"))
                     .icon(icons::appearance)
-                    .subtitle("Светлая, тёмная или как в системе")
+                    .subtitle(t("Light, dark or match the system"))
                     .last(),
                 |ui| {
                     egui::ComboBox::from_id_salt("theme_mode")
@@ -950,7 +958,7 @@ impl SettingsUi {
             );
         });
 
-        widgets::section_caption(ui, theme, "Как показывать перевод");
+        widgets::section_caption(ui, theme, t("How to show the translation"));
         for view in ResultView::all() {
             let selected = s.result_view == view;
             let resp = view_card(ui, theme, view.label(), view.description(), selected);
@@ -960,13 +968,13 @@ impl SettingsUi {
             ui.add_space(6.0);
         }
 
-        widgets::section_caption(ui, theme, "Окно результата");
+        widgets::section_caption(ui, theme, t("Result window"));
         widgets::list(ui, theme, |ui| {
             widgets::row(
                 ui,
                 theme,
-                RowSpec::new("Держать поверх всех окон")
-                    .subtitle("Окно перевода не уйдёт за другие"),
+                RowSpec::new(t("Keep on top of other windows"))
+                    .subtitle(t("The translation window stays in front")),
                 |ui| {
                     widgets::toggle(ui, theme, &mut s.pin_result_window);
                 },
@@ -974,8 +982,8 @@ impl SettingsUi {
             widgets::row(
                 ui,
                 theme,
-                RowSpec::new("Закрывать при потере фокуса")
-                    .subtitle("Клик мимо окна убирает перевод")
+                RowSpec::new(t("Close when it loses focus"))
+                    .subtitle(t("Clicking outside dismisses the translation"))
                     .last(),
                 |ui| {
                     widgets::toggle(ui, theme, &mut s.close_result_on_focus_loss);
@@ -998,8 +1006,8 @@ impl SettingsUi {
             widgets::row(
                 ui,
                 theme,
-                RowSpec::new("Запоминать переводы")
-                    .subtitle("Только в памяти — на диск не пишется"),
+                RowSpec::new(t("Remember translations"))
+                    .subtitle(t("In memory only — nothing is written to disk")),
                 |ui| {
                     widgets::toggle(ui, theme, &mut s.keep_history);
                 },
@@ -1007,8 +1015,8 @@ impl SettingsUi {
             widgets::row(
                 ui,
                 theme,
-                RowSpec::new("Сколько переводов помнить")
-                    .subtitle("Самые старые вытесняются новыми")
+                RowSpec::new(t("How many translations to keep"))
+                    .subtitle(t("The oldest are pushed out by new ones"))
                     .last(),
                 |ui| {
                     ui.add_enabled_ui(s.keep_history, |ui| {
@@ -1028,7 +1036,7 @@ impl SettingsUi {
             hint(
                 ui,
                 theme,
-                "История выключена. Переводы нигде не сохраняются.",
+                t("History is off. Translations are not saved anywhere."),
             );
             return;
         }
@@ -1036,13 +1044,16 @@ impl SettingsUi {
         ui.add_space(10.0);
         ui.horizontal(|ui| {
             ui.label(
-                egui::RichText::new(format!("Последние переводы · {}", info.history.len()))
-                    .font(text::small())
-                    .color(theme.text_dim),
+                egui::RichText::new(
+                    t("Recent translations · {count}")
+                        .replace("{count}", &info.history.len().to_string()),
+                )
+                .font(text::small())
+                .color(theme.text_dim),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_enabled_ui(!info.history.is_empty(), |ui| {
-                    if widgets::ghost_button(ui, theme, "Очистить").clicked() {
+                    if widgets::ghost_button(ui, theme, t("Clear history")).clicked() {
                         out.clear_history = true;
                     }
                 });
@@ -1051,7 +1062,7 @@ impl SettingsUi {
         ui.add_space(6.0);
 
         if info.history.is_empty() {
-            hint(ui, theme, "Пока ничего не переведено в этом сеансе.");
+            hint(ui, theme, t("Nothing has been translated in this session yet."));
             return;
         }
 
@@ -1061,31 +1072,29 @@ impl SettingsUi {
         widgets::card(ui, theme, |ui| {
             let total = info.history.len();
             for (i, entry) in info.history.iter().enumerate() {
-                let open = self.open_entry == Some(i);
+                let open = self.open_entry == Some(entry.id);
                 if history_row(ui, theme, entry, i + 1 == total && !open, open).clicked() {
-                    toggled = Some(i);
+                    toggled = Some(entry.id);
                 }
                 if open {
-                    history_detail(ui, theme, entry, i, i + 1 == total);
+                    history_detail(ui, theme, entry, i + 1 == total);
                 }
             }
         });
-        if let Some(i) = toggled {
+        if let Some(id) = toggled {
             // Clicking the open one closes it, so the list can be collapsed back
             // without hunting for a control.
-            self.open_entry = if self.open_entry == Some(i) { None } else { Some(i) };
+            self.open_entry = if self.open_entry == Some(id) { None } else { Some(id) };
         }
 
         if let Some(latest) = info.history.latest() {
             hint(
                 ui,
                 theme,
-                &format!(
-                    "Последний перевод выполнил {} ({} → {}).",
-                    latest.engine.label(),
-                    latest.source.badge(),
-                    latest.target.badge()
-                ),
+                &t("The last translation came from {engine} ({from} → {to}).")
+                    .replace("{engine}", latest.engine.label())
+                    .replace("{from}", latest.source.badge())
+                    .replace("{to}", latest.target.badge()),
             );
         }
     }
@@ -1104,9 +1113,9 @@ impl SettingsUi {
             widgets::row(
                 ui,
                 theme,
-                RowSpec::new("Хранить дней")
+                RowSpec::new(t("Keep for days"))
                     .icon(icons::journal)
-                    .subtitle("Файлы старше удаляются автоматически"),
+                    .subtitle(t("Older files are deleted automatically")),
                 |ui| {
                     let mut n = s.logs.retention_days;
                     if ui
@@ -1121,7 +1130,8 @@ impl SettingsUi {
             widgets::row(
                 ui,
                 theme,
-                RowSpec::new("Предел за день, МБ").subtitle("После лимита записи пропускаются"),
+                RowSpec::new(t("Daily limit, MB"))
+                    .subtitle(t("Past the limit, entries are dropped")),
                 |ui| {
                     let mut n = s.logs.max_mb_per_day;
                     if ui
@@ -1136,8 +1146,8 @@ impl SettingsUi {
             widgets::row(
                 ui,
                 theme,
-                RowSpec::new("Записывать распознанный текст")
-                    .subtitle("Только для разбора ошибки")
+                RowSpec::new(t("Write the recognised text to the log"))
+                    .subtitle(t("Only for tracking down a bug"))
                     .last(),
                 |ui| {
                     if widgets::toggle(ui, theme, &mut s.logs.verbose).changed() {
@@ -1152,22 +1162,21 @@ impl SettingsUi {
                 ui,
                 theme,
                 theme.warning,
-                "В журнал попадёт весь распознанный и переведённый текст, то есть \
-                 содержимое ваших экранов.",
+                t("The log will contain every recognised and translated line, which means \
+                   whatever is on your screen."),
             );
         }
 
         hint(
             ui,
             theme,
-            "Каждый день пишется в отдельный файл, старые удаляются автоматически, \
-             поэтому журнал не растёт.",
+            t("Each day goes into its own file and old ones are deleted automatically, \
+               so the log does not grow."),
         );
 
         ui.add_space(10.0);
         ui.horizontal(|ui| {
-            if widgets::secondary_button(ui, theme, "Открыть папку журнала").clicked()
-            {
+            if widgets::secondary_button(ui, theme, t("Open the log folder")).clicked() {
                 out.open_log_dir = true;
             }
         });
@@ -1182,7 +1191,7 @@ impl SettingsUi {
             hint(
                 ui,
                 theme,
-                "Новые значения применятся при следующем запуске.",
+                t("The new values take effect on the next launch."),
             );
         }
     }
@@ -1208,20 +1217,22 @@ impl SettingsUi {
                         .color(theme.text),
                 );
                 ui.label(
-                    egui::RichText::new(format!("Версия {}", env!("CARGO_PKG_VERSION")))
-                        .font(text::small())
-                        .color(theme.text_dim),
+                    egui::RichText::new(
+                        t("Version {version}").replace("{version}", env!("CARGO_PKG_VERSION")),
+                    )
+                    .font(text::small())
+                    .color(theme.text_dim),
                 );
             });
         });
 
-        widgets::section_caption(ui, theme, "Обновления");
+        widgets::section_caption(ui, theme, t("Updates"));
         widgets::list(ui, theme, |ui| {
             widgets::row(
                 ui,
                 theme,
-                RowSpec::new("Уведомлять о новой версии")
-                    .subtitle("Системное уведомление, когда выходит обновление"),
+                RowSpec::new(t("Notify me about new versions"))
+                    .subtitle(t("A system notification when an update is released")),
                 |ui| {
                     widgets::toggle(ui, theme, &mut s.notify_about_updates);
                 },
@@ -1230,16 +1241,16 @@ impl SettingsUi {
                 ui,
                 theme,
                 RowSpec::new(info.update_status)
-                    .subtitle("Загружается только с GitHub этого проекта")
+                    .subtitle(t("Downloaded only from this project's GitHub"))
                     .last(),
                 |ui| {
                     ui.add_enabled_ui(info.update_check_enabled, |ui| {
-                        if widgets::ghost_button(ui, theme, "Проверить").clicked() {
+                        if widgets::ghost_button(ui, theme, t("Check")).clicked() {
                             out.check_update = true;
                         }
                     });
                     ui.add_enabled_ui(info.update_install_enabled, |ui| {
-                        if widgets::primary_button(ui, theme, "Установить").clicked() {
+                        if widgets::primary_button(ui, theme, t("Install")).clicked() {
                             out.install_update = true;
                         }
                     });
@@ -1247,10 +1258,10 @@ impl SettingsUi {
             );
         });
 
-        widgets::section_caption(ui, theme, "Ссылки");
+        widgets::section_caption(ui, theme, t("Links"));
         ui.horizontal(|ui| {
             ui.label(
-                egui::RichText::new("Исходный код")
+                egui::RichText::new(t("Source code"))
                     .font(text::small())
                     .color(theme.text_dim),
             );
@@ -1261,19 +1272,19 @@ impl SettingsUi {
         });
         ui.horizontal(|ui| {
             ui.label(
-                egui::RichText::new("Автор")
+                egui::RichText::new(t("Author"))
                     .font(text::small())
                     .color(theme.text_dim),
             );
             ui.hyperlink_to("クシススミタ", "https://github.com/Kushisusumita");
         });
 
-        widgets::section_caption(ui, theme, "Поддержать проект");
+        widgets::section_caption(ui, theme, t("Support the project"));
         // Two labels rather than one string with a newline: a line continuation
-        // inside a Russian sentence is easy to get subtly wrong, and did.
+        // inside a translated sentence is easy to get subtly wrong, and did.
         for line in [
-            "Программа бесплатная и такой останется.",
-            "Поддержать развитие или просто сказать спасибо — по желанию.",
+            t("The app is free and will stay free."),
+            t("Supporting its development, or just saying thanks, is up to you."),
         ] {
             ui.label(
                 egui::RichText::new(line)
@@ -1295,9 +1306,9 @@ impl SettingsUi {
                     // Brand colours: a brand mark in the interface's own grey
                     // is not recognisable as the brand.
                     .icon_tint(Color32::from_rgb(0xF0, 0xB9, 0x0B))
-                    .subtitle("Перевод по QR-ссылке, без комиссии"),
+                    .subtitle(t("Pay by QR link, no fee")),
                 |ui| {
-                    if widgets::secondary_button(ui, theme, "Открыть").clicked() {
+                    if widgets::secondary_button(ui, theme, t("Open")).clicked() {
                         ui.ctx().open_url(egui::OpenUrl::new_tab(BINANCE_URL));
                     }
                 },
@@ -1308,11 +1319,10 @@ impl SettingsUi {
                 RowSpec::new("USDT · TRC20")
                     .icon(icons::tether)
                     .icon_tint(Color32::from_rgb(0x26, 0xA1, 0x7B))
-                    .subtitle("Без аккаунта Binance")
+                    .subtitle(t("No Binance account needed"))
                     .last(),
                 |ui| {
-                    if widgets::secondary_button(ui, theme, "Копировать адрес").clicked()
-                    {
+                    if widgets::secondary_button(ui, theme, t("Copy address")).clicked() {
                         ui.output_mut(|o| o.copied_text = USDT_ADDRESS.to_string());
                     }
                     ui.label(
@@ -1332,14 +1342,16 @@ impl SettingsUi {
 fn engine_summary(s: &Settings) -> String {
     let active = s.engines.active();
     match active.first() {
-        None => "Ни один движок не готов".to_string(),
+        None => t("No engine is ready").to_string(),
         Some(first) => {
             let rest = active.len().saturating_sub(1);
             let head = format!("{} · {}", first.label(), s.engines.status(*first));
             if rest == 0 {
                 head
             } else {
-                format!("{head}, затем ещё {rest}")
+                t("{engines}, then {count} more")
+                    .replace("{engines}", &head)
+                    .replace("{count}", &rest.to_string())
             }
         }
     }
@@ -1589,13 +1601,7 @@ fn history_row(
 ///
 /// Bounded in height so one long capture cannot push the rest of the list off
 /// the page — inside that box the text scrolls, however much of it there is.
-fn history_detail(
-    ui: &mut egui::Ui,
-    theme: &Theme,
-    entry: &HistoryEntry,
-    index: usize,
-    last: bool,
-) {
+fn history_detail(ui: &mut egui::Ui, theme: &Theme, entry: &HistoryEntry, last: bool) {
     const MAX_HEIGHT: f32 = 220.0;
 
     egui::Frame::none()
@@ -1607,15 +1613,22 @@ fn history_detail(
         })
         .show(ui, |ui| {
             egui::ScrollArea::vertical()
-                // Keyed by position: two captures of the same length would
-                // otherwise share one scroll position.
-                .id_salt(index)
+                // Vertical only, and never wider than the block: without this
+                // the labels lay themselves out on one endless line and the
+                // text runs under the scrollbar instead of wrapping.
+                .auto_shrink([false, false])
+                // Keyed by the entry, so a scroll position belongs to the
+                // text it was scrolled through.
+                .id_salt(entry.id)
                 .max_height(MAX_HEIGHT)
                 .show(ui, |ui| {
+                    ui.set_max_width(ui.available_width());
                     ui.label(
-                        egui::RichText::new(format!("{} · оригинал", entry.source.badge()))
-                            .font(text::caption())
-                            .color(theme.text_faint),
+                        egui::RichText::new(
+                            t("{lang} · original").replace("{lang}", entry.source.badge()),
+                        )
+                        .font(text::caption())
+                        .color(theme.text_faint),
                     );
                     ui.add_space(2.0);
                     ui.label(
@@ -1625,9 +1638,11 @@ fn history_detail(
                     );
                     ui.add_space(8.0);
                     ui.label(
-                        egui::RichText::new(format!("{} · перевод", entry.target.badge()))
-                            .font(text::caption())
-                            .color(theme.sakura_deep),
+                        egui::RichText::new(
+                            t("{lang} · translation").replace("{lang}", entry.target.badge()),
+                        )
+                        .font(text::caption())
+                        .color(theme.sakura_deep),
                     );
                     ui.add_space(2.0);
                     ui.label(
@@ -1639,15 +1654,15 @@ fn history_detail(
 
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if widgets::secondary_button(ui, theme, "Копировать перевод").clicked() {
+                if widgets::secondary_button(ui, theme, t("Copy translation")).clicked() {
                     ui.output_mut(|o| o.copied_text = entry.translated.clone());
                 }
                 ui.label(
-                    egui::RichText::new(format!(
-                        "{} · {} символов",
-                        entry.engine.label(),
-                        entry.translated.chars().count()
-                    ))
+                    egui::RichText::new(
+                        t("{engine} · {count} characters")
+                            .replace("{engine}", entry.engine.label())
+                            .replace("{count}", &entry.translated.chars().count().to_string()),
+                    )
                     .font(text::caption())
                     .color(theme.text_faint),
                 );
@@ -1683,6 +1698,28 @@ fn one_line(
     ui.fonts(|f| f.layout_job(job))
 }
 
+/// Interface language, with "match the system" as the first entry.
+///
+/// Every language names itself: a list written in the *current* interface
+/// language is no help to someone who cannot read the current interface
+/// language, which is exactly who opens this.
+fn ui_language_picker(ui: &mut egui::Ui, value: &mut Option<Lang>) {
+    let selected = match value {
+        Some(lang) => lang.endonym(),
+        None => t("Match the system language"),
+    };
+
+    egui::ComboBox::from_id_salt("ui_language")
+        .selected_text(selected)
+        .width(field_width(ui))
+        .show_ui(ui, |ui| {
+            ui.selectable_value(value, None, t("Match the system language"));
+            for lang in Lang::ALL {
+                ui.selectable_value(value, Some(lang), lang.endonym());
+            }
+        });
+}
+
 /// Width for an input inside a settings row: as wide as fits, capped so the
 /// label beside it stays readable.
 fn field_width(ui: &egui::Ui) -> f32 {
@@ -1696,7 +1733,7 @@ fn secret_field(ui: &mut egui::Ui, id: &str, buf: &mut String, reveal: bool) -> 
             .id_salt(id)
             .password(!reveal)
             .desired_width(field_width(ui))
-            .hint_text("вставьте ключ"),
+            .hint_text(t("paste the key")),
     )
     .changed()
 }
@@ -1870,15 +1907,15 @@ mod tests {
 
     #[test]
     fn search_finds_a_page_by_its_label() {
-        assert!(Section::Languages.matches("язык", Platform::Windows));
-        assert!(!Section::Logs.matches("язык", Platform::Windows));
+        assert!(Section::Languages.matches("language", Platform::Windows));
+        assert!(!Section::Logs.matches("language", Platform::Windows));
     }
 
     #[test]
     fn search_finds_a_page_by_what_is_on_it() {
         // "deepl" is nowhere in the label, but it is what the page is for.
         assert!(Section::Engine.matches("deepl", Platform::Windows));
-        assert!(Section::General.matches("автозапуск", Platform::Windows));
+        assert!(Section::General.matches("autostart", Platform::Windows));
     }
 
     #[test]
@@ -1911,7 +1948,7 @@ mod tests {
         let s = Settings::default();
         let summary = engine_summary(&s);
         assert!(summary.starts_with("Yandex"), "{summary}");
-        assert!(summary.contains("ещё 1"), "{summary}");
+        assert!(summary.contains("then 1 more"), "{summary}");
     }
 
     #[test]
@@ -1919,6 +1956,6 @@ mod tests {
         let mut s = Settings::default();
         s.engines.yandex = false;
         s.engines.google = false;
-        assert_eq!(engine_summary(&s), "Ни один движок не готов");
+        assert_eq!(engine_summary(&s), "No engine is ready");
     }
 }

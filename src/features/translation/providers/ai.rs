@@ -22,12 +22,13 @@ use crate::entities::language::Language;
 use crate::entities::settings::{AiConfig, AiProtocol};
 use crate::features::translation::client::HTTP;
 use crate::shared::error::AppError;
+use crate::shared::i18n::t;
 use crate::shared::logging::clip;
 
 pub async fn translate(req: &TranslateRequest, cfg: &AiConfig) -> Result<String, AppError> {
     if !cfg.is_usable() {
         return Err(AppError::Other(
-            "не настроен: нужны адрес, модель и ключ".into(),
+            t("Not configured: a URL, a model and a key are required").into(),
         ));
     }
 
@@ -42,7 +43,9 @@ pub async fn translate(req: &TranslateRequest, cfg: &AiConfig) -> Result<String,
 
     let cleaned = clean_output(&raw);
     if cleaned.trim().is_empty() {
-        return Err(AppError::Other("модель вернула пустой ответ".into()));
+        return Err(AppError::Other(
+            t("The model returned an empty response").into(),
+        ));
     }
     Ok(cleaned)
 }
@@ -124,7 +127,9 @@ async fn call_openai(
     }
 
     let v: Value = serde_json::from_str(&raw)
-        .map_err(|e| AppError::Other(format!("нераспознанный ответ: {e}")))?;
+        .map_err(|e| {
+            AppError::Other(t("Unreadable response: {error}").replace("{error}", &e.to_string()))
+        })?;
     parse_openai(&v)
 }
 
@@ -133,7 +138,9 @@ fn parse_openai(v: &Value) -> Result<String, AppError> {
     // array-of-parts shape.
     let msg = v
         .pointer("/choices/0/message/content")
-        .ok_or_else(|| AppError::Other("в ответе нет choices[0].message.content".into()))?;
+        .ok_or_else(|| {
+            AppError::Other(t("The response has no choices[0].message.content").into())
+        })?;
 
     if let Some(s) = msg.as_str() {
         return Ok(s.to_string());
@@ -147,7 +154,7 @@ fn parse_openai(v: &Value) -> Result<String, AppError> {
             return Ok(joined);
         }
     }
-    Err(AppError::Other("пустое поле content".into()))
+    Err(AppError::Other(t("The content field is empty").into()))
 }
 
 // ── Anthropic Messages ───────────────────────────────────────────────────────
@@ -180,7 +187,9 @@ async fn call_anthropic(
     }
 
     let v: Value = serde_json::from_str(&raw)
-        .map_err(|e| AppError::Other(format!("нераспознанный ответ: {e}")))?;
+        .map_err(|e| {
+            AppError::Other(t("Unreadable response: {error}").replace("{error}", &e.to_string()))
+        })?;
     parse_anthropic(&v)
 }
 
@@ -188,7 +197,7 @@ fn parse_anthropic(v: &Value) -> Result<String, AppError> {
     let blocks = v
         .get("content")
         .and_then(Value::as_array)
-        .ok_or_else(|| AppError::Other("в ответе нет блока content".into()))?;
+        .ok_or_else(|| AppError::Other(t("The response has no content block").into()))?;
 
     // Skip thinking/tool blocks and take the text ones.
     let text: String = blocks
@@ -198,7 +207,9 @@ fn parse_anthropic(v: &Value) -> Result<String, AppError> {
         .collect();
 
     if text.is_empty() {
-        return Err(AppError::Other("нет текстовых блоков в ответе".into()));
+        return Err(AppError::Other(
+            t("The response has no text blocks").into(),
+        ));
     }
     Ok(text)
 }
@@ -235,7 +246,9 @@ async fn call_gemini(
     }
 
     let v: Value = serde_json::from_str(&raw)
-        .map_err(|e| AppError::Other(format!("нераспознанный ответ: {e}")))?;
+        .map_err(|e| {
+            AppError::Other(t("Unreadable response: {error}").replace("{error}", &e.to_string()))
+        })?;
     parse_gemini(&v)
 }
 
@@ -246,7 +259,7 @@ fn parse_gemini(v: &Value) -> Result<String, AppError> {
     {
         if reason == "SAFETY" || reason == "PROHIBITED_CONTENT" {
             return Err(AppError::Other(
-                "Gemini отклонил текст по фильтру безопасности".into(),
+                t("Gemini blocked the text with its safety filter").into(),
             ));
         }
     }
@@ -254,7 +267,9 @@ fn parse_gemini(v: &Value) -> Result<String, AppError> {
     let parts = v
         .pointer("/candidates/0/content/parts")
         .and_then(Value::as_array)
-        .ok_or_else(|| AppError::Other("в ответе нет candidates[0].content.parts".into()))?;
+        .ok_or_else(|| {
+            AppError::Other(t("The response has no candidates[0].content.parts").into())
+        })?;
 
     let text: String = parts
         .iter()
@@ -262,7 +277,7 @@ fn parse_gemini(v: &Value) -> Result<String, AppError> {
         .collect();
 
     if text.is_empty() {
-        return Err(AppError::Other("пустой ответ модели".into()));
+        return Err(AppError::Other(t("Empty response from the model").into()));
     }
     Ok(text)
 }
@@ -291,11 +306,18 @@ fn explain(status: u16, body: &str) -> String {
         })
         .unwrap_or_else(|| clip(body.trim(), 200).to_string());
 
+    let status_text = status.to_string();
     match status {
-        401 | 403 => format!("ключ отклонён ({status}): {msg}"),
-        404 => format!("не найдена модель или адрес ({status}): {msg}"),
-        429 => format!("превышен лимит запросов: {msg}"),
-        500..=599 => format!("сбой на стороне провайдера ({status}): {msg}"),
+        401 | 403 => t("Key rejected ({status}): {message}")
+            .replace("{status}", &status_text)
+            .replace("{message}", &msg),
+        404 => t("Model or URL not found ({status}): {message}")
+            .replace("{status}", &status_text)
+            .replace("{message}", &msg),
+        429 => t("Rate limit exceeded: {message}").replace("{message}", &msg),
+        500..=599 => t("The provider failed ({status}): {message}")
+            .replace("{status}", &status_text)
+            .replace("{message}", &msg),
         _ => format!("HTTP {status}: {msg}"),
     }
 }
@@ -370,7 +392,9 @@ mod tests {
         let v: Value =
             serde_json::from_str(r#"{"candidates":[{"finishReason":"SAFETY"}]}"#).unwrap();
         let err = parse_gemini(&v).unwrap_err().to_string();
-        assert!(err.contains("безопасн"), "{err}");
+        // The text is translated at runtime, so assert on what survives every
+        // language: the provider name.
+        assert!(err.contains("Gemini"), "{err}");
     }
 
     #[test]

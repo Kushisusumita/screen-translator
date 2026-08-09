@@ -18,6 +18,7 @@ use super::{chunk_text, TranslateRequest, MAX_CHUNK_CHARS};
 use crate::entities::language::Language;
 use crate::features::translation::client::HTTP;
 use crate::shared::error::AppError;
+use crate::shared::i18n::t;
 use crate::shared::logging::clip;
 
 const ENDPOINT: &str = "https://translate.googleapis.com/translate_a/single";
@@ -80,13 +81,15 @@ async fn translate_chunk(text: &str, sl: &str, tl: &str) -> Result<String, AppEr
 /// not match sentence boundaries, so the pieces are concatenated verbatim —
 /// Google already puts the spacing inside them.
 fn parse(raw: &str) -> Result<String, AppError> {
-    let json: Value = serde_json::from_str(raw)
-        .map_err(|e| AppError::Other(format!("нераспознанный ответ Google: {e}")))?;
+    let json: Value = serde_json::from_str(raw).map_err(|e| {
+        AppError::Other(
+            t("Unrecognized response from Google: {error}").replace("{error}", &e.to_string()),
+        )
+    })?;
 
-    let segments = json
-        .get(0)
-        .and_then(Value::as_array)
-        .ok_or_else(|| AppError::Other("ответ Google без блока перевода".into()))?;
+    let segments = json.get(0).and_then(Value::as_array).ok_or_else(|| {
+        AppError::Other(t("Google's response has no translation block").to_string())
+    })?;
 
     let text: String = segments
         .iter()
@@ -94,7 +97,9 @@ fn parse(raw: &str) -> Result<String, AppError> {
         .collect();
 
     if text.trim().is_empty() {
-        return Err(AppError::Other("Google вернул пустой перевод".into()));
+        return Err(AppError::Other(
+            t("Google returned an empty translation").to_string(),
+        ));
     }
     Ok(text)
 }

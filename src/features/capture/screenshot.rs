@@ -20,6 +20,7 @@ use image::{ImageBuffer, RgbImage};
 use tracing::{debug, warn};
 
 use crate::shared::error::AppError;
+use crate::shared::i18n::t;
 
 #[cfg(windows)]
 use windows::Win32::Foundation::{HWND, RECT};
@@ -235,20 +236,20 @@ fn grab(area: Bounds) -> Result<RawCapture, AppError> {
     unsafe {
         let screen_dc = GetDC(HWND(std::ptr::null_mut()));
         if screen_dc.0.is_null() {
-            return Err(AppError::Other("GetDC не выдал контекст экрана".into()));
+            return Err(AppError::Other(t("GetDC returned no screen context").into()));
         }
 
         let mem_dc = CreateCompatibleDC(screen_dc);
         if mem_dc.0.is_null() {
             ReleaseDC(HWND(std::ptr::null_mut()), screen_dc);
-            return Err(AppError::Other("CreateCompatibleDC не сработал".into()));
+            return Err(AppError::Other(t("CreateCompatibleDC failed").into()));
         }
 
         let bmp = CreateCompatibleBitmap(screen_dc, area.w, area.h);
         if bmp.0.is_null() {
             let _ = DeleteDC(mem_dc);
             ReleaseDC(HWND(std::ptr::null_mut()), screen_dc);
-            return Err(AppError::Other("CreateCompatibleBitmap не сработал".into()));
+            return Err(AppError::Other(t("CreateCompatibleBitmap failed").into()));
         }
 
         let _guard = GdiCapture {
@@ -265,7 +266,9 @@ fn grab(area: Bounds) -> Result<RawCapture, AppError> {
         // when it is called, so the selection is undone the moment BitBlt is
         // done with it rather than at scope exit.
         SelectObject(mem_dc, old);
-        blit.map_err(|e| AppError::Other(format!("BitBlt не сработал: {e}")))?;
+        blit.map_err(|e| {
+            AppError::Other(t("BitBlt failed: {error}").replace("{error}", &e.to_string()))
+        })?;
 
         let mut bi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
@@ -286,7 +289,7 @@ fn grab(area: Bounds) -> Result<RawCapture, AppError> {
         let len = (area.w as usize)
             .checked_mul(area.h as usize)
             .and_then(|p| p.checked_mul(4))
-            .ok_or_else(|| AppError::Other("область слишком велика".into()))?;
+            .ok_or_else(|| AppError::Other(t("The area is too large").into()))?;
         let mut bgra = vec![0u8; len];
 
         let scan_lines = GetDIBits(
@@ -300,7 +303,7 @@ fn grab(area: Bounds) -> Result<RawCapture, AppError> {
         );
 
         if scan_lines == 0 {
-            return Err(AppError::Other("GetDIBits вернул 0 строк".into()));
+            return Err(AppError::Other(t("GetDIBits returned no rows").into()));
         }
 
         Ok(RawCapture {
@@ -332,6 +335,7 @@ pub use portable::ScaleMap;
 mod portable {
     use super::{Bounds, RawCapture};
     use crate::shared::error::AppError;
+    use crate::shared::i18n::t;
     use tracing::{debug, warn};
     use xcap::image::RgbaImage;
     use xcap::Monitor;
@@ -503,12 +507,12 @@ mod portable {
     /// from every monitor the rectangle touches.
     pub fn grab(area: Bounds) -> Result<RawCapture, AppError> {
         if area.w <= 0 || area.h <= 0 {
-            return Err(AppError::Other("пустая область захвата".into()));
+            return Err(AppError::Other(t("The capture area is empty").into()));
         }
 
         let screens = screens();
         if screens.is_empty() {
-            return Err(AppError::Other("не найден ни один монитор".into()));
+            return Err(AppError::Other(t("No monitor was found").into()));
         }
 
         let mut bgra = vec![0u8; area.w as usize * area.h as usize * 4];
@@ -539,7 +543,7 @@ mod portable {
 
         if !captured_any {
             return Err(AppError::Other(last_error.unwrap_or_else(|| {
-                "область захвата не попала ни на один монитор".into()
+                t("The capture area does not touch any monitor").into()
             })));
         }
 
@@ -610,14 +614,16 @@ pub fn capture_desktop_image() -> Result<(egui::ColorImage, Bounds), AppError> {
 pub fn capture_region_for_ocr(area: Bounds) -> Result<Vec<u8>, AppError> {
     let Some(area) = area.clamp_to(virtual_desktop()) else {
         return Err(AppError::Other(
-            "выделенная область целиком за пределами экрана".into(),
+            t("The selected area is entirely off screen").into(),
         ));
     };
     if area.w < MIN_SIDE || area.h < MIN_SIDE {
-        return Err(AppError::Other(format!(
-            "Слишком маленькая область: {}×{} (минимум {MIN_SIDE}×{MIN_SIDE})",
-            area.w, area.h
-        )));
+        return Err(AppError::Other(
+            t("The area is too small: {width}×{height} (the minimum is {min}×{min})")
+                .replace("{width}", &area.w.to_string())
+                .replace("{height}", &area.h.to_string())
+                .replace("{min}", &MIN_SIDE.to_string()),
+        ));
     }
 
     let raw = grab(area)?;
@@ -630,7 +636,7 @@ pub fn capture_region_for_ocr(area: Bounds) -> Result<Vec<u8>, AppError> {
     }
 
     let img: RgbImage = ImageBuffer::from_raw(raw.w as u32, raw.h as u32, rgb)
-        .ok_or_else(|| AppError::Other("не удалось собрать изображение".into()))?;
+        .ok_or_else(|| AppError::Other(t("Could not assemble the image").into()))?;
 
     encode_for_ocr(img)
 }

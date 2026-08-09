@@ -7,6 +7,7 @@ use super::{chunk_text, TranslateRequest, MAX_CHUNK_CHARS};
 use crate::entities::language::Language;
 use crate::features::translation::client::HTTP;
 use crate::shared::error::AppError;
+use crate::shared::i18n::t;
 use crate::shared::logging::clip;
 use crate::shared::secret::Secret;
 
@@ -69,13 +70,13 @@ fn source_code(lang: Language) -> Option<&'static str> {
 
 pub async fn translate(req: &TranslateRequest, key: &Secret) -> Result<String, AppError> {
     if key.is_empty() {
-        return Err(AppError::Other("не задан API-ключ".into()));
+        return Err(AppError::Other(t("No API key set").to_string()));
     }
     let target = target_code(req.target).ok_or_else(|| {
-        AppError::Other(format!(
-            "язык «{}» не поддерживается DeepL",
-            req.target.name_ru()
-        ))
+        AppError::Other(
+            t("DeepL does not support {language}")
+                .replace("{language}", &req.target.to_string()),
+        )
     })?;
 
     let url = endpoint_for(key.expose());
@@ -117,8 +118,11 @@ pub async fn translate(req: &TranslateRequest, key: &Secret) -> Result<String, A
 }
 
 fn parse(raw: &str) -> Result<String, AppError> {
-    let json: Value = serde_json::from_str(raw)
-        .map_err(|e| AppError::Other(format!("нераспознанный ответ DeepL: {e}")))?;
+    let json: Value = serde_json::from_str(raw).map_err(|e| {
+        AppError::Other(
+            t("Unrecognized response from DeepL: {error}").replace("{error}", &e.to_string()),
+        )
+    })?;
     let parts: Vec<&str> = json
         .get("translations")
         .and_then(Value::as_array)
@@ -130,7 +134,9 @@ fn parse(raw: &str) -> Result<String, AppError> {
         .unwrap_or_default();
 
     if parts.is_empty() {
-        return Err(AppError::Other("DeepL вернул пустой перевод".into()));
+        return Err(AppError::Other(
+            t("DeepL returned an empty translation").to_string(),
+        ));
     }
     Ok(parts.join(" "))
 }
@@ -144,11 +150,10 @@ fn explain(status: u16, body: &str) -> String {
         .unwrap_or_else(|| clip(body.trim(), 160).to_string());
 
     match status {
-        403 => {
-            "ключ отклонён — проверьте его и тип аккаунта (free-ключ оканчивается на :fx)".into()
-        }
-        429 => "слишком много запросов, попробуйте позже".into(),
-        456 => "исчерпан лимит символов на аккаунте DeepL".into(),
+        403 => t("Key rejected — check the key and the account type (a free key ends in :fx)")
+            .to_string(),
+        429 => t("Too many requests, try again later").to_string(),
+        456 => t("The DeepL account is out of characters").to_string(),
         _ => format!("HTTP {status} — {detail}"),
     }
 }
@@ -189,6 +194,6 @@ mod tests {
 
     #[test]
     fn quota_exhaustion_says_so() {
-        assert!(explain(456, "{}").contains("лимит"));
+        assert!(explain(456, "{}").contains("out of characters"));
     }
 }

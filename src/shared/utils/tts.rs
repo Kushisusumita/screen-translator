@@ -17,6 +17,7 @@ use std::process::Stdio;
 use tracing::{info, warn};
 
 use crate::shared::error::AppError;
+use crate::shared::i18n::t;
 
 #[cfg(windows)]
 const SCRIPT: &str = "\
@@ -44,12 +45,21 @@ pub fn speak(text: &str) -> Result<(), AppError> {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|e| AppError::Other(format!("не запустить синтез речи: {e}")))?;
+            .map_err(|e| {
+                AppError::Other(
+                    t("Could not start speech synthesis: {error}")
+                        .replace("{error}", &e.to_string()),
+                )
+            })?;
 
         if let Some(mut stdin) = child.stdin.take() {
             stdin
                 .write_all(text.as_bytes())
-                .map_err(|e| AppError::Other(format!("не передать текст: {e}")))?;
+                .map_err(|e| {
+                    AppError::Other(
+                        t("Could not send the text: {error}").replace("{error}", &e.to_string()),
+                    )
+                })?;
         }
 
         // Detached on purpose: speaking a paragraph takes seconds and must not
@@ -70,7 +80,12 @@ pub fn speak(text: &str) -> Result<(), AppError> {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|e| AppError::Other(format!("не запустить say: {e}")))?;
+            .map_err(|e| {
+                AppError::Other(
+                    t("Could not start speech synthesis: {error}")
+                        .replace("{error}", &e.to_string()),
+                )
+            })?;
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(text.as_bytes());
         }
@@ -92,12 +107,20 @@ pub fn speak(text: &str) -> Result<(), AppError> {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|e| AppError::Other(format!("не запустить spd-say: {e}")))?;
+            .map_err(|e| {
+                AppError::Other(
+                    t("Could not start spd-say: {error}").replace("{error}", &e.to_string()),
+                )
+            })?;
 
         if let Some(mut stdin) = child.stdin.take() {
             stdin
                 .write_all(text.as_bytes())
-                .map_err(|e| AppError::Other(format!("не передать текст: {e}")))?;
+                .map_err(|e| {
+                    AppError::Other(
+                        t("Could not send the text: {error}").replace("{error}", &e.to_string()),
+                    )
+                })?;
         }
 
         std::thread::spawn(move || match child.wait() {

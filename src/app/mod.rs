@@ -29,6 +29,7 @@ use crate::features::settings::ui::{Section, SettingsContext, SettingsUi};
 use crate::features::translation::{run_pipeline, PipelineParams, PipelineResult};
 use crate::features::tray::{TrayEvent, TrayManager};
 use crate::features::updater::{check_for_update, download_and_apply, UpdateInfo};
+use crate::shared::i18n::t;
 use crate::shared::logging;
 use crate::shared::utils::autostart::{get_current_exe_path, set_autostart};
 use crate::shared::utils::clipboard::copy_text_to_clipboard;
@@ -348,6 +349,7 @@ impl App {
                 }
                 if self.settings.keep_history {
                     self.history.push(HistoryEntry {
+                        id: History::next_id(),
                         original: res.original.clone(),
                         translated: res.translated.clone(),
                         source: res.source,
@@ -529,7 +531,8 @@ impl App {
         info!(%version, "Notifying about a new release");
         notify::show(
             "Sakura Screen Translator",
-            &format!("Доступна версия {version}. Установить можно в «Параметры → О программе»."),
+            &t("Version {version} is available. You can install it in Settings → About.")
+                .replace("{version}", &version),
         );
     }
 
@@ -540,34 +543,43 @@ impl App {
         let (status, check_enabled, install_enabled, install_url) = {
             let st = self.update.lock().unwrap_or_else(|e| e.into_inner());
             match &*st {
-                UpdateState::Checking => ("Проверяю обновления…".to_string(), false, false, None),
+                UpdateState::Checking => {
+                    (t("Checking for updates…").to_string(), false, false, None)
+                }
                 UpdateState::UpToDate => (
-                    format!(
-                        "Установлена последняя версия ({})",
-                        env!("CARGO_PKG_VERSION")
-                    ),
+                    t("You are on the latest version ({version})")
+                        .replace("{version}", env!("CARGO_PKG_VERSION")),
                     true,
                     false,
                     None,
                 ),
                 UpdateState::Available(info) => (
                     if info.size > 0 {
-                        format!(
-                            "Доступна версия {} · {:.1} МБ",
-                            info.version,
-                            info.size as f64 / (1024.0 * 1024.0)
-                        )
+                        t("Version {version} is available · {size} MB")
+                            .replace("{version}", &info.version)
+                            .replace(
+                                "{size}",
+                                &format!("{:.1}", info.size as f64 / (1024.0 * 1024.0)),
+                            )
                     } else {
-                        format!("Доступна версия {}", info.version)
+                        t("Version {version} is available").replace("{version}", &info.version)
                     },
                     true,
                     true,
                     Some(info.url.clone()),
                 ),
-                UpdateState::Downloading => {
-                    ("Загружаю обновление…".to_string(), false, false, None)
-                }
-                UpdateState::Error(e) => (format!("Ошибка: {e}"), true, false, None),
+                UpdateState::Downloading => (
+                    t("Downloading the update…").to_string(),
+                    false,
+                    false,
+                    None,
+                ),
+                UpdateState::Error(e) => (
+                    t("Error: {message}").replace("{message}", e),
+                    true,
+                    false,
+                    None,
+                ),
             }
         };
 
@@ -580,7 +592,7 @@ impl App {
         let rejected = self.hotkeys.rejected();
 
         let mut builder = ViewportBuilder::default()
-            .with_title("Sakura Screen Translator — Параметры")
+            .with_title(t("Sakura Screen Translator — Settings"))
             .with_inner_size([760.0, 560.0])
             .with_min_inner_size([680.0, 460.0]);
         builder = builder.with_icon(Arc::new(load_app_icon()));
@@ -651,6 +663,7 @@ impl App {
         install_url: Option<String>,
     ) {
         let theme_changed = next.theme != self.settings.theme;
+        let language_changed = next.ui_language != self.settings.ui_language;
         let history_limit_changed = next.history_limit != self.settings.history_limit;
         // Turning the history off throws away what is already in it: leaving
         // the list behind would be keeping exactly what the user just asked
@@ -664,6 +677,16 @@ impl App {
         }
         self.settings = next;
 
+        // Applied before anything else reads a string this frame.
+        if language_changed {
+            let language = self
+                .settings
+                .ui_language
+                .or_else(crate::shared::i18n::detect_system)
+                .unwrap_or(crate::shared::i18n::Lang::En);
+            crate::shared::i18n::set(language);
+            self.tray.update_hotkeys(self.settings.hotkeys);
+        }
         if theme_changed {
             self.theme = Theme::resolve(self.settings.theme);
         }
@@ -723,7 +746,7 @@ impl App {
 
     fn start_ai_test(&mut self) {
         self.ai_test_running = true;
-        *self.ai_test.lock().unwrap_or_else(|e| e.into_inner()) = Some("Проверяю…".to_string());
+        *self.ai_test.lock().unwrap_or_else(|e| e.into_inner()) = Some(t("Checking…").to_string());
 
         let cfg = self.settings.engines.ai_config.clone();
         let target = self.settings.target_lang;
@@ -743,7 +766,8 @@ impl App {
                 },
             };
             let msg = match ai::translate(&req, &cfg).await {
-                Ok(t) => format!("✓ Ответ получен: {}", logging::clip(t.trim(), 60)),
+                Ok(reply) => t("✓ Got a reply: {reply}")
+                    .replace("{reply}", logging::clip(reply.trim(), 60)),
                 Err(e) => format!("✗ {e}"),
             };
             *slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(msg);
@@ -759,7 +783,7 @@ impl App {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .as_deref()
-            .is_some_and(|s| s != "Проверяю…");
+            .is_some_and(|s| s != t("Checking…"));
         if done {
             self.ai_test_running = false;
         }

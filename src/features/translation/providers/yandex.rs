@@ -20,6 +20,7 @@ use super::{chunk_text, TranslateRequest, MAX_CHUNK_CHARS};
 use crate::entities::language::Language;
 use crate::features::translation::client::{HTTP, YANDEX_SESSION};
 use crate::shared::error::AppError;
+use crate::shared::i18n::t;
 use crate::shared::logging::clip;
 
 const API: &str = "https://translate.yandex.net/api/v1/tr.json/translate";
@@ -30,7 +31,7 @@ pub async fn translate(req: &TranslateRequest, allow_headless: bool) -> Result<S
 
     match api_translate(req).await {
         Ok(t) if !t.trim().is_empty() => return Ok(t),
-        Ok(_) => errors.push("API: пустой ответ".to_string()),
+        Ok(_) => errors.push(t("API: empty response").to_string()),
         Err(e) => {
             debug!(error = %e, "Yandex JSON API failed, falling back to page scrape");
             errors.push(format!("API: {e}"));
@@ -39,14 +40,14 @@ pub async fn translate(req: &TranslateRequest, allow_headless: bool) -> Result<S
 
     match web_scrape(req).await {
         Ok(t) if !t.trim().is_empty() => return Ok(t),
-        Ok(_) => errors.push("web: пустой ответ".to_string()),
+        Ok(_) => errors.push(t("web: empty response").to_string()),
         Err(e) => errors.push(format!("web: {e}")),
     }
 
     if allow_headless {
         match headless(req).await {
             Ok(t) if !t.trim().is_empty() => return Ok(t),
-            Ok(_) => errors.push("headless: пустой ответ".to_string()),
+            Ok(_) => errors.push(t("headless: empty response").to_string()),
             Err(e) => errors.push(format!("headless: {e}")),
         }
     }
@@ -110,27 +111,32 @@ async fn api_translate(req: &TranslateRequest) -> Result<String, AppError> {
 
 /// `{"code":200,"lang":"en-ru","text":["…"]}`
 fn parse_api(body: &str) -> Result<String, AppError> {
-    let json: Value = serde_json::from_str(body)
-        .map_err(|e| AppError::Other(format!("нераспознанный ответ: {e}")))?;
+    let json: Value = serde_json::from_str(body).map_err(|e| {
+        AppError::Other(t("Unrecognized response: {error}").replace("{error}", &e.to_string()))
+    })?;
 
     if let Some(code) = json.get("code").and_then(Value::as_i64) {
         if code != 200 {
             let msg = json
                 .get("message")
                 .and_then(Value::as_str)
-                .unwrap_or("без описания");
-            return Err(AppError::Other(format!("код {code}: {msg}")));
+                .unwrap_or(t("no details"));
+            return Err(AppError::Other(
+                t("Code {code}: {message}")
+                    .replace("{code}", &code.to_string())
+                    .replace("{message}", msg),
+            ));
         }
     }
 
     let parts = json
         .get("text")
         .and_then(Value::as_array)
-        .ok_or_else(|| AppError::Other("в ответе нет поля text".into()))?;
+        .ok_or_else(|| AppError::Other(t("The response has no text field").to_string()))?;
 
     let text: Vec<&str> = parts.iter().filter_map(Value::as_str).collect();
     if text.is_empty() {
-        return Err(AppError::Other("пустой массив text".into()));
+        return Err(AppError::Other(t("The text array is empty").to_string()));
     }
     Ok(text.join("\n"))
 }
@@ -186,7 +192,9 @@ async fn web_scrape(req: &TranslateRequest) -> Result<String, AppError> {
         }
     }
 
-    Err(AppError::Other("перевод не найден в HTML".into()))
+    Err(AppError::Other(
+        t("No translation found in the HTML").to_string(),
+    ))
 }
 
 const GLOBAL_VARS: &[&str] = &[
@@ -443,7 +451,7 @@ async fn headless(req: &TranslateRequest) -> Result<String, AppError> {
     use tokio::time::{sleep, timeout};
 
     let exe = find_chromium_executable()
-        .ok_or_else(|| AppError::Other("не найден Chrome или Edge".into()))?;
+        .ok_or_else(|| AppError::Other(t("Chrome or Edge not found").to_string()))?;
 
     let src = match req.source {
         Language::Auto => "auto".to_string(),
@@ -463,11 +471,15 @@ async fn headless(req: &TranslateRequest) -> Result<String, AppError> {
         .arg("--disable-gpu")
         .arg("--disable-dev-shm-usage")
         .build()
-        .map_err(|e| AppError::Other(format!("конфигурация браузера: {e}")))?;
+        .map_err(|e| {
+            AppError::Other(
+                t("Browser configuration: {error}").replace("{error}", &e.to_string()),
+            )
+        })?;
 
-    let (mut browser, mut handler) = Browser::launch(config)
-        .await
-        .map_err(|e| AppError::Other(format!("запуск браузера: {e}")))?;
+    let (mut browser, mut handler) = Browser::launch(config).await.map_err(|e| {
+        AppError::Other(t("Browser launch: {error}").replace("{error}", &e.to_string()))
+    })?;
 
     let driver = tokio::spawn(async move { while handler.next().await.is_some() {} });
 
@@ -482,7 +494,9 @@ async fn headless(req: &TranslateRequest) -> Result<String, AppError> {
         let page = browser
             .new_page(&url)
             .await
-            .map_err(|e| AppError::Other(format!("открытие страницы: {e}")))?;
+            .map_err(|e| {
+                AppError::Other(t("Opening the page: {error}").replace("{error}", &e.to_string()))
+            })?;
         loop {
             if let Ok(val) = page.evaluate(POLL_JS).await {
                 if let Ok(Some(t)) = val.into_value::<Option<String>>() {
@@ -505,7 +519,9 @@ async fn headless(req: &TranslateRequest) -> Result<String, AppError> {
     match outcome {
         Ok(Ok(text)) => Ok(text),
         Ok(Err(e)) => Err(e),
-        Err(_) => Err(AppError::Other("браузер не перевёл за 20 с".into())),
+        Err(_) => Err(AppError::Other(
+            t("The browser did not translate within 20 s").to_string(),
+        )),
     }
 }
 

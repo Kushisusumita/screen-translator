@@ -10,6 +10,7 @@ use crate::features::translation::cache;
 use crate::features::translation::ocr;
 use crate::features::translation::providers::{self, TranslateRequest};
 use crate::shared::error::AppError;
+use crate::shared::i18n::t;
 
 /// Everything the pipeline needs, copied out of `Settings` so no lock is held
 /// across an await point.
@@ -54,7 +55,7 @@ pub async fn run(jpeg: &[u8], params: &PipelineParams) -> Result<PipelineResult,
 
     if original.trim().is_empty() {
         return Err(AppError::Other(
-            "В выделенной области не найден текст.".to_string(),
+            t("No text found in the selected area.").to_string(),
         ));
     }
 

@@ -14,6 +14,7 @@ use tracing::{debug, info, warn};
 use crate::entities::language::Language;
 use crate::features::translation::client::{HTTP, YANDEX_SESSION};
 use crate::shared::error::AppError;
+use crate::shared::i18n::t;
 use crate::shared::logging::{clip, redact};
 
 pub struct OcrResult {
@@ -62,8 +63,9 @@ pub async fn recognize(jpeg: &[u8]) -> Result<OcrResult, AppError> {
         )));
     }
 
-    let json: Value = serde_json::from_str(&body)
-        .map_err(|e| AppError::Other(format!("нераспознанный ответ OCR: {e}")))?;
+    let json: Value = serde_json::from_str(&body).map_err(|e| {
+        AppError::Other(t("Unreadable OCR response: {error}").replace("{error}", &e.to_string()))
+    })?;
 
     let result = parse(&json);
 

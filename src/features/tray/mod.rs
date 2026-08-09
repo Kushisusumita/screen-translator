@@ -143,10 +143,14 @@ mod portable {
     use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
     use crate::entities::settings::Hotkey;
+    use crate::shared::i18n::t;
     use crate::ui::spin::Spin;
 
     const TOOLTIP_IDLE: &str = "Sakura Screen Translator";
-    const TOOLTIP_BUSY: &str = "Sakura Screen Translator — перевод…";
+
+    fn tooltip_busy() -> &'static str {
+        t("Sakura Screen Translator — translating…")
+    }
 
     /// Size of the rasterised mark. Both platforms scale it down themselves;
     /// 32 px is enough for a menu bar at 2× and cheap enough to redraw at
@@ -218,7 +222,7 @@ mod portable {
         pub fn set_busy(&self, busy: bool) {
             self.busy.set(busy);
             if let Some(tray) = self.tray.as_ref() {
-                let _ = tray.set_tooltip(Some(if busy { TOOLTIP_BUSY } else { TOOLTIP_IDLE }));
+                let _ = tray.set_tooltip(Some(if busy { tooltip_busy() } else { TOOLTIP_IDLE }));
             }
         }
 
@@ -314,8 +318,8 @@ mod portable {
             true,
             None,
         );
-        let settings = MenuItem::new("Параметры", true, None);
-        let exit = MenuItem::new("Выход", true, None);
+        let settings = MenuItem::new(t("Settings"), true, None);
+        let exit = MenuItem::new(t("Quit"), true, None);
 
         let menu = Menu::new();
         let built = menu
@@ -449,6 +453,8 @@ mod win {
 
     use std::sync::mpsc::Sender;
     use std::sync::{Arc, Mutex};
+
+    use crate::shared::i18n::t;
 
     use tracing::{error, warn};
     use windows::core::PCWSTR;
@@ -879,8 +885,14 @@ mod win {
         let region = item(CaptureMode::Region.label_menu(), &hotkeys.region);
         let window = item(CaptureMode::Window.label_menu(), &hotkeys.window);
         let full = item(CaptureMode::FullScreen.label_menu(), &hotkeys.fullscreen);
-        let settings: Vec<u16> = "Параметры\0".encode_utf16().collect();
-        let exit: Vec<u16> = "Выход\0".encode_utf16().collect();
+        let settings: Vec<u16> = t("Settings")
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let exit: Vec<u16> = t("Quit")
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
 
         let _ = AppendMenuW(menu, MF_STRING, ID_REGION, PCWSTR(region.as_ptr()));
         let _ = AppendMenuW(menu, MF_STRING, ID_WINDOW, PCWSTR(window.as_ptr()));

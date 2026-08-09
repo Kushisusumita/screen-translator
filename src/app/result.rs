@@ -16,6 +16,7 @@ use egui::{
 use crate::entities::settings::ResultView;
 use crate::features::capture::{Bounds, Geometry};
 use crate::features::translation::PipelineResult;
+use crate::shared::i18n::t;
 use crate::ui::platform::CaptionStyle;
 use crate::ui::theme::text;
 use crate::ui::{icons, widgets, Theme};
@@ -88,7 +89,7 @@ impl ResultUi {
             stage: Stage::Loading {
                 since: Instant::now(),
             },
-            // "Не показывать" still needs somewhere to report a failure, so the
+            // "Don't show" still needs somewhere to report a failure, so the
             // popup stands in for it.
             view: if view == ResultView::None {
                 ResultView::Popup
@@ -314,13 +315,17 @@ impl ResultUi {
                                     ui.spacing_mut().item_spacing.x = 6.0;
                                     let has_result = matches!(self.stage, Stage::Done(_));
                                     ui.add_enabled_ui(has_result, |ui| {
-                                        if widgets::primary_button(ui, theme, "Копировать")
+                                        if widgets::primary_button(ui, theme, t("Copy"))
                                             .clicked()
                                         {
                                             actions.push(ResultAction::Copy);
                                         }
-                                        if widgets::secondary_button(ui, theme, "Поверх оригинала")
-                                            .clicked()
+                                        if widgets::secondary_button(
+                                            ui,
+                                            theme,
+                                            t("Over the original"),
+                                        )
+                                        .clicked()
                                         {
                                             actions
                                                 .push(ResultAction::SwitchTo(ResultView::Inline));
@@ -334,7 +339,7 @@ impl ResultUi {
                                                 theme,
                                                 icons::close,
                                                 24.0,
-                                                "Закрыть · Esc",
+                                                t("Close · Esc"),
                                             )
                                             .clicked()
                                             {
@@ -345,7 +350,7 @@ impl ResultUi {
                                                 theme,
                                                 icons::pin,
                                                 24.0,
-                                                "Открыть в отдельном окне",
+                                                t("Open in a separate window"),
                                             )
                                             .clicked()
                                             {
@@ -567,6 +572,12 @@ impl ResultUi {
                     }
                 }
 
+                // Where the plate ended up. The toolbar is placed under *this*,
+                // not under the capture rectangle: the plate grows past that
+                // rectangle whenever the translation is longer than the original,
+                // which for most language pairs is the normal case, and a toolbar
+                // pinned to the old geometry lands on top of the last lines.
+                let mut plate_rect = None;
                 egui::CentralPanel::default()
                     .frame(egui::Frame::none().fill(Color32::BLACK))
                     .show(ctx, |ui| {
@@ -599,7 +610,7 @@ impl ResultUi {
                                     r.translated.clone()
                                 }
                             }
-                            Stage::Loading { .. } => "Перевожу…".to_string(),
+                            Stage::Loading { .. } => t("Translating…").to_string(),
                             Stage::Error(e) => e.clone(),
                         };
 
@@ -642,6 +653,7 @@ impl ResultUi {
                             egui::Stroke::new(1.5, theme.sakura_border()),
                         );
 
+                        plate_rect = Some(plate);
                         let mut plate_ui = ui.new_child(
                             egui::UiBuilder::new()
                                 .max_rect(plate.shrink2(Vec2::new(8.0, 6.0)))
@@ -665,11 +677,21 @@ impl ResultUi {
                 // Mini toolbar under the patch.
                 let screen = ctx.screen_rect();
                 let patch = geometry.bounds_to_rect(anchor, screen.min);
+                // Under the plate when there is room for it, above the plate
+                // when the plate reaches the bottom of the screen. Clamping it
+                // to the screen instead would push it back over the text.
+                const TOOLBAR_H: f32 = 40.0;
+                let plate = plate_rect.unwrap_or(patch);
+                let toolbar_y = if plate.max.y + 12.0 + TOOLBAR_H <= screen.max.y {
+                    plate.max.y + 12.0
+                } else {
+                    (plate.min.y - 12.0 - TOOLBAR_H).max(screen.min.y + 8.0)
+                };
                 egui::Area::new(egui::Id::new("inline_toolbar"))
                     .order(egui::Order::Foreground)
                     .fixed_pos(egui::pos2(
                         patch.center().x,
-                        (patch.max.y + 12.0).min(screen.max.y - 44.0),
+                        toolbar_y,
                     ))
                     .pivot(Align2::CENTER_TOP)
                     .show(ctx, |ui| {
@@ -695,10 +717,10 @@ impl ResultUi {
                                         toggle_original = Some(true);
                                     }
                                     ui.add_space(4.0);
-                                    if flat(ui, "Копировать").clicked() {
+                                    if flat(ui, t("Copy")).clicked() {
                                         actions.push(ResultAction::Copy);
                                     }
-                                    if flat(ui, "В окно ↗").clicked() {
+                                    if flat(ui, t("Open in window ↗")).clicked() {
                                         actions.push(ResultAction::SwitchTo(ResultView::Window));
                                     }
                                     if flat(ui, "✕").clicked() {
@@ -762,9 +784,15 @@ impl ResultUi {
             .with_resizable(true)
             .with_min_inner_size([360.0, 200.0])
             .with_transparent(true);
-        if pinned {
-            builder = builder.with_always_on_top();
-        }
+        // Both directions, explicitly. `ViewportBuilder::patch` only emits a
+        // window-level command when the new builder *has* a level, so leaving
+        // the field unset on unpin says "no opinion" and the window stays on
+        // top for the rest of its life.
+        builder = if pinned {
+            builder.with_window_level(egui::viewport::WindowLevel::AlwaysOnTop)
+        } else {
+            builder.with_window_level(egui::viewport::WindowLevel::Normal)
+        };
         #[cfg(any(target_os = "macos", windows))]
         let builder = builder.with_title(WINDOW_TITLE);
 
@@ -776,16 +804,18 @@ impl ResultUi {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     ui.add_enabled_ui(has_result, |ui| {
-                        if widgets::primary_button(ui, theme, "Копировать").clicked() {
+                        if widgets::primary_button(ui, theme, t("Copy")).clicked() {
                             actions.push(ResultAction::Copy);
                         }
-                        if widgets::secondary_button(ui, theme, "Озвучить").clicked() {
+                        if widgets::secondary_button(ui, theme, t("Speak")).clicked() {
                             actions.push(ResultAction::Speak);
                         }
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
-                            egui::RichText::new(format!("История · {history_len}"))
+                            egui::RichText::new(
+                                t("History · {count}").replace("{count}", &history_len.to_string()),
+                            )
                                 .font(text::caption())
                                 .color(theme.text_dim),
                         );
@@ -895,7 +925,7 @@ impl ResultUi {
                             ui.painter().text(
                                 bar.center(),
                                 Align2::CENTER_CENTER,
-                                "Sakura — перевод",
+                                t("Sakura — translation"),
                                 text::small(),
                                 theme.text_dim,
                             );
@@ -912,9 +942,9 @@ impl ResultUi {
                             );
                             if pin_resp
                                 .on_hover_text(if pinned {
-                                    "Открепить"
+                                    t("Unpin")
                                 } else {
-                                    "Поверх всех окон"
+                                    t("Keep on top of other windows")
                                 })
                                 .clicked()
                             {
@@ -951,7 +981,8 @@ impl ResultUi {
                                                 theme,
                                                 col,
                                                 body_h,
-                                                &format!("{} · ОРИГИНАЛ", r.source.badge()),
+                                                &t("{lang} · ORIGINAL")
+                                                    .replace("{lang}", r.source.badge()),
                                                 theme.text_dim,
                                                 &r.original,
                                                 false,
@@ -967,7 +998,8 @@ impl ResultUi {
                                                 theme,
                                                 col,
                                                 body_h,
-                                                &format!("{} · ПЕРЕВОД", r.target.badge()),
+                                                &t("{lang} · TRANSLATION")
+                                                    .replace("{lang}", r.target.badge()),
                                                 theme.sakura_deep,
                                                 &r.translated,
                                                 true,
@@ -1019,13 +1051,14 @@ impl ResultUi {
                 source: r.source.badge().to_string(),
                 target: r.target.badge().to_string(),
                 right: if r.from_cache {
-                    format!("{} · из кэша", r.engine.label())
+                    t("{engine} · from cache").replace("{engine}", r.engine.label())
                 } else {
-                    format!(
-                        "{} · {:.1} c",
-                        r.engine.label(),
-                        r.engine_elapsed.as_secs_f32()
-                    )
+                    t("{engine} · {seconds} s")
+                        .replace("{engine}", r.engine.label())
+                        .replace(
+                            "{seconds}",
+                            &format!("{:.1}", r.engine_elapsed.as_secs_f32()),
+                        )
                 },
             },
             Stage::Loading { .. } => HeaderInfo {
@@ -1036,7 +1069,7 @@ impl ResultUi {
             Stage::Error(_) => HeaderInfo {
                 source: "—".into(),
                 target: "—".into(),
-                right: "ошибка".into(),
+                right: t("error").into(),
             },
         }
     }
@@ -1122,7 +1155,7 @@ fn loading_body(ui: &mut egui::Ui, theme: &Theme, phase: f32) {
             icons::spinner(ui.painter(), rect, theme.sakura, phase);
             ui.add_space(4.0);
             ui.label(
-                egui::RichText::new("Перевожу…")
+                egui::RichText::new(t("Translating…"))
                     .font(text::body())
                     .color(theme.text_dim),
             );

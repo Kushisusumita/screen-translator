@@ -5,6 +5,7 @@ use egui::{Align2, Color32, ColorImage, Pos2, Rect, Sense, Stroke, TextureHandle
 use super::screenshot::Bounds;
 use super::window_pick::{hit_test, WindowInfo};
 use crate::entities::settings::CaptureMode;
+use crate::shared::i18n::t;
 use crate::ui::theme::text;
 use crate::ui::{icons, widgets, Theme};
 
@@ -478,8 +479,7 @@ fn paint_top_bar(ctx: &egui::Context, theme: &Theme, state: &mut OverlayState) {
                             .color(Color32::from_rgba_unmultiplied(255, 255, 255, 130)),
                     );
                 }
-                if widgets::overlay_button(ui, theme, icons::close, "Esc — отмена").clicked()
-                {
+                if widgets::overlay_button(ui, theme, icons::close, t("Esc — cancel")).clicked() {
                     state.cancelled = true;
                 }
             });
@@ -490,16 +490,16 @@ fn paint_hint(ctx: &egui::Context, theme: &Theme, state: &OverlayState) {
     // Each platform names the space bar and the copy shortcut its own way, and
     // the design spells both out differently in the two rounds.
     let hint = match state.mode {
-        CaptureMode::Region => format!(
-            "Esc — отмена  ·  ПКМ — сбросить выделение  ·  {space} — переместить выделение  ·  {copy} — скопировать перевод",
-            space = theme.platform.space_key(),
-            copy = theme.platform.copy_shortcut(),
-        ),
+        CaptureMode::Region => t(
+            "Esc — cancel  ·  Right click — clear the selection  ·  {space} — move the selection  ·  {copy} — copy the translation",
+        )
+        .replace("{space}", theme.platform.space_key())
+        .replace("{copy}", theme.platform.copy_shortcut()),
         CaptureMode::Window => {
-            "Наведите на окно и кликните  ·  Tab — режим  ·  Esc — отмена".to_string()
+            t("Point at a window and click  ·  Tab — mode  ·  Esc — cancel").to_string()
         }
         CaptureMode::FullScreen => {
-            "Кликните, чтобы перевести весь экран  ·  Esc — отмена".to_string()
+            t("Click to translate the whole screen  ·  Esc — cancel").to_string()
         }
     };
     let screen = ctx.screen_rect();

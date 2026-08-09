@@ -728,7 +728,7 @@ pub fn search_field(ui: &mut Ui, theme: &Theme, query: &mut String) -> bool {
                 .frame(false)
                 .desired_width(f32::INFINITY)
                 .font(text::small())
-                .hint_text("Поиск параметра"),
+                .hint_text(crate::shared::i18n::t("Search settings")),
         )
         .changed()
 }
