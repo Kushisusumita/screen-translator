@@ -17,6 +17,7 @@
 
 use std::path::{Path, PathBuf};
 
+use futures::StreamExt;
 use tracing::{info, warn};
 
 use super::checker::url_is_allowed;
@@ -29,16 +30,27 @@ const MAX_SIZE: usize = 200 * 1024 * 1024;
 
 const OLD_SUFFIX: &str = ".old";
 
-pub async fn download_and_apply(url: &str) -> Result<(), String> {
+/// Downloads the new build and puts it in place, reporting progress as it goes.
+///
+/// `progress` is called with (received, total) as the body arrives; total is 0
+/// when the server does not say. Streaming rather than `bytes()` is what makes
+/// a progress bar possible at all — the old code waited for the whole ten
+/// megabytes in one call, so the window said "downloading" and nothing else
+/// until it was over.
+///
+/// Returns the path of the installed executable. Restarting is the caller's
+/// job: this runs on a worker thread, and quitting from here skipped saving the
+/// settings and left the tray icon behind.
+pub async fn download_and_apply(
+    url: &str,
+    progress: impl Fn(u64, u64),
+) -> Result<PathBuf, String> {
     if !url_is_allowed(url) {
-        return Err(
-            t("The update link does not point to GitHub — the install was cancelled").into(),
-        );
+        return Err(t("The update link does not point to GitHub — the install was cancelled").into());
     }
 
-    let current = std::env::current_exe().map_err(|e| {
-        t("Could not find the program path: {error}").replace("{error}", &e.to_string())
-    })?;
+    let current = std::env::current_exe()
+        .map_err(|e| t("Could not find the program path: {error}").replace("{error}", &e.to_string()))?;
     let dir = current
         .parent()
         .ok_or_else(|| t("Could not determine the install folder").to_string())?
@@ -52,24 +64,41 @@ pub async fn download_and_apply(url: &str) -> Result<(), String> {
         .user_agent(concat!("screen-translator/", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(180))
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            warn!(error = %e, "Could not build the download client");
+            t("Could not reach the update server").to_string()
+        })?;
 
     info!(url, "Downloading update");
-    let resp = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| t("Download failed: {error}").replace("{error}", &e.to_string()))?;
+    let resp = client.get(url).send().await.map_err(|e| {
+        warn!(error = %e, "Update download failed");
+        t("Could not reach the update server").to_string()
+    })?;
 
     if !resp.status().is_success() {
-        return Err(
-            t("The server returned HTTP {status}").replace("{status}", &resp.status().to_string())
-        );
+        warn!(status = resp.status().as_u16(), "Update download refused");
+        return Err(t("Could not download the update right now").to_string());
     }
 
-    let bytes = resp.bytes().await.map_err(|e| {
-        t("The download was interrupted: {error}").replace("{error}", &e.to_string())
-    })?;
+    let total = resp.content_length().unwrap_or(0);
+    validate_size_hint(total)?;
+
+    let mut bytes: Vec<u8> = Vec::with_capacity(total as usize);
+    let mut stream = resp.bytes_stream();
+    progress(0, total);
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| {
+            warn!(error = %e, "Update download interrupted");
+            t("The download was interrupted").to_string()
+        })?;
+        bytes.extend_from_slice(&chunk);
+        // A server that lies about the length, or none at all, must not let the
+        // download grow without bound.
+        if bytes.len() > MAX_SIZE {
+            return Err(t("The update file is implausibly large").into());
+        }
+        progress(bytes.len() as u64, total);
+    }
 
     validate_payload(&bytes)?;
 
@@ -87,10 +116,10 @@ pub async fn download_and_apply(url: &str) -> Result<(), String> {
     // follows the file.
     if let Err(e) = std::fs::rename(&current, &retired) {
         let _ = std::fs::remove_file(&staged);
-        return Err(t(
-            "Could not free the program file: {error}. You may need administrator rights.",
-        )
-        .replace("{error}", &e.to_string()));
+        return Err(
+            t("Could not free the program file: {error}. You may need administrator rights.")
+                .replace("{error}", &e.to_string()),
+        );
     }
 
     if let Err(e) = std::fs::rename(&staged, &current) {
@@ -100,16 +129,23 @@ pub async fn download_and_apply(url: &str) -> Result<(), String> {
         return Err(t("Could not install the update: {error}").replace("{error}", &e.to_string()));
     }
 
-    info!("Update installed, restarting");
-    match std::process::Command::new(&current).spawn() {
-        Ok(_) => {
-            std::process::exit(0);
-        }
-        Err(e) => Err(t(
-            "The update was installed but the restart failed: {error}. Start the program manually.",
-        )
-        .replace("{error}", &e.to_string())),
+    // Keep the executable bit on the platforms that have one.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o755));
     }
+
+    info!("Update installed");
+    Ok(current)
+}
+
+/// Rejects an implausible download before a byte of it is transferred.
+fn validate_size_hint(total: u64) -> Result<(), String> {
+    if total > MAX_SIZE as u64 {
+        return Err(t("The update file is implausibly large").into());
+    }
+    Ok(())
 }
 
 /// Removes the previous build left behind by an update. Called at startup, when

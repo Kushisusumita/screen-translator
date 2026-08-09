@@ -43,12 +43,19 @@ use result::{ResultAction, ResultUi, Stage};
 /// belongs to a capture the user has already replaced, and is dropped.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
+/// Where a platform without a prebuilt binary is sent instead of downloading
+/// one it cannot run.
+const RELEASES_PAGE: &str = "https://github.com/Kushisusumita/screen-translator/releases/latest";
+
 #[derive(Debug, Clone)]
 enum UpdateState {
     Checking,
     UpToDate,
     Available(UpdateInfo),
-    Downloading,
+    Downloading { received: u64, total: u64 },
+    /// Installed and waiting to be restarted. The restart happens on the UI
+    /// thread so the settings are saved and the tray icon removed first.
+    Installed(std::path::PathBuf),
     Error(String),
 }
 
@@ -516,6 +523,42 @@ impl App {
         }
     }
 
+    /// Starts the newly installed build and quits this one.
+    ///
+    /// Done here rather than inside the installer, which runs on a worker
+    /// thread and used to call `process::exit(0)` — that skipped saving the
+    /// settings, left the tray icon behind, and from the outside looked exactly
+    /// like the app crashing after a download.
+    fn restart_if_updated(&mut self, ctx: &Context) {
+        let path = {
+            let state = self.update.lock().unwrap_or_else(|e| e.into_inner());
+            match &*state {
+                UpdateState::Installed(path) => path.clone(),
+                _ => return,
+            }
+        };
+
+        // The new copy opens on the About page, so the first thing the user sees
+        // is the version they just installed rather than an app that vanished.
+        match std::process::Command::new(&path)
+            .arg("--settings")
+            .arg("about")
+            .spawn()
+        {
+            Ok(_) => {
+                info!(path = %path.display(), "Restarting into the new version");
+                self.shutdown(ctx);
+            }
+            Err(e) => {
+                error!(error = %e, "Could not start the new version");
+                *self.update.lock().unwrap_or_else(|p| p.into_inner()) = UpdateState::Error(
+                    t("The update is installed but could not be started — open the program again")
+                        .to_string(),
+                );
+            }
+        }
+    }
+
     /// Tells the user a new release exists, once per release.
     ///
     /// The app has no window of its own most of the time, so the only place a
@@ -555,6 +598,8 @@ impl App {
         let mut close = false;
         let theme = self.theme;
 
+        // Filled in while reading the update state, so the row can draw a bar.
+        let mut progress: Option<f32> = None;
         let (status, check_enabled, install_enabled, install_url) = {
             let st = self.update.lock().unwrap_or_else(|e| e.into_inner());
             match &*st {
@@ -583,8 +628,27 @@ impl App {
                     true,
                     Some(info.url.clone()),
                 ),
-                UpdateState::Downloading => (
-                    t("Downloading the update…").to_string(),
+                UpdateState::Downloading { received, total } => {
+                    // A ten-megabyte download with no sign of movement looks
+                    // like a hang. Bytes when the server gives a length, and
+                    // a running total when it does not.
+                    let text = if *total > 0 {
+                        t("Downloading the update… {done} of {total} MB")
+                            .replace("{done}", &format!("{:.1}", *received as f64 / 1048576.0))
+                            .replace("{total}", &format!("{:.1}", *total as f64 / 1048576.0))
+                    } else {
+                        t("Downloading the update… {done} MB")
+                            .replace("{done}", &format!("{:.1}", *received as f64 / 1048576.0))
+                    };
+                    progress = if *total > 0 {
+                        Some(*received as f32 / *total as f32)
+                    } else {
+                        None
+                    };
+                    (text, false, false, None)
+                }
+                UpdateState::Installed(_) => (
+                    t("Update installed — restarting…").to_string(),
                     false,
                     false,
                     None,
@@ -643,6 +707,7 @@ impl App {
                         update_status: &status,
                         update_check_enabled: check_enabled,
                         update_install_enabled: install_enabled,
+                    update_progress: progress,
                         ai_test_status: &ai_status,
                         ai_test_running: self.ai_test_running,
                         rejected_hotkeys: &rejected,
@@ -753,15 +818,41 @@ impl App {
         }
         if out.install_update {
             if let Some(url) = install_url {
-                *self.update.lock().unwrap_or_else(|e| e.into_inner()) = UpdateState::Downloading;
+                *self.update.lock().unwrap_or_else(|e| e.into_inner()) =
+                    UpdateState::Downloading {
+                        received: 0,
+                        total: 0,
+                    };
                 let state = Arc::clone(&self.update);
+                let repaint = ctx.clone();
                 self.rt.spawn(async move {
-                    if let Err(e) = download_and_apply(&url).await {
-                        error!(error = %e, "Update failed");
-                        *state.lock().unwrap_or_else(|p| p.into_inner()) = UpdateState::Error(e);
-                    }
+                    let progress_state = Arc::clone(&state);
+                    let progress_ctx = repaint.clone();
+                    let outcome = download_and_apply(&url, move |received, total| {
+                        *progress_state.lock().unwrap_or_else(|p| p.into_inner()) =
+                            UpdateState::Downloading { received, total };
+                        // The window is idle while this runs; without a nudge
+                        // the bar would only move when something else happened
+                        // to wake it.
+                        progress_ctx.request_repaint();
+                    })
+                    .await;
+
+                    *state.lock().unwrap_or_else(|p| p.into_inner()) = match outcome {
+                        Ok(path) => UpdateState::Installed(path),
+                        Err(e) => {
+                            error!(error = %e, "Update failed");
+                            UpdateState::Error(e)
+                        }
+                    };
+                    repaint.request_repaint();
                 });
             }
+        }
+        if out.open_release_page {
+            // The release carries a Windows binary only, so everywhere else
+            // the honest action is to show the page and let the user decide.
+            ctx.open_url(egui::OpenUrl::new_tab(RELEASES_PAGE));
         }
         if out.test_ai && !self.ai_test_running {
             self.start_ai_test();
@@ -862,6 +953,7 @@ impl eframe::App for App {
         self.poll_ai_test();
         self.sync_tray_activity(ctx);
         self.announce_update();
+        self.restart_if_updated(ctx);
 
         if self.overlay.is_some() {
             self.show_overlay(ctx);

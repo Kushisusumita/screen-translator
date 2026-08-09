@@ -153,6 +153,8 @@ pub struct SettingsContext<'a> {
     pub update_status: &'a str,
     pub update_check_enabled: bool,
     pub update_install_enabled: bool,
+    /// How far the download has got, when one is running.
+    pub update_progress: Option<f32>,
     pub ai_test_status: &'a str,
     pub ai_test_running: bool,
     pub rejected_hotkeys: &'a [HotkeyAction],
@@ -170,6 +172,8 @@ pub struct SettingsOutput {
     pub tray_changed: bool,
     pub check_update: bool,
     pub install_update: bool,
+    /// Platforms without a binary in the release open the page instead.
+    pub open_release_page: bool,
     pub test_ai: bool,
     pub open_log_dir: bool,
     pub clear_history: bool,
@@ -1249,14 +1253,37 @@ impl SettingsUi {
                             out.check_update = true;
                         }
                     });
-                    ui.add_enabled_ui(info.update_install_enabled, |ui| {
-                        if widgets::primary_button(ui, theme, t("Install")).clicked() {
-                            out.install_update = true;
-                        }
-                    });
+                    // Only Windows has a binary to install: the release
+                    // carries a .exe and nothing else. Offering "Install"
+                    // elsewhere downloads ten megabytes to be rejected by the
+                    // signature check at the end of it.
+                    if cfg!(windows) {
+                        ui.add_enabled_ui(info.update_install_enabled, |ui| {
+                            if widgets::primary_button(ui, theme, t("Install")).clicked() {
+                                out.install_update = true;
+                            }
+                        });
+                    } else {
+                        ui.add_enabled_ui(info.update_install_enabled, |ui| {
+                            if widgets::primary_button(ui, theme, t("Open the release")).clicked()
+                            {
+                                out.open_release_page = true;
+                            }
+                        });
+                    }
                 },
             );
         });
+
+        if let Some(fraction) = info.update_progress {
+            ui.add_space(6.0);
+            ui.add(
+                egui::ProgressBar::new(fraction)
+                    .desired_height(6.0)
+                    .fill(theme.accent)
+                    .rounding(egui::Rounding::same(3.0)),
+            );
+        }
 
         widgets::section_caption(ui, theme, t("Links"));
         ui.horizontal(|ui| {
