@@ -1,154 +1,187 @@
 <div align="center">
 
-# Screen Translator
+<img src="assets/icon.png" width="120" alt="Sakura Screen Translator">
+
+# 🌸 Sakura Screen Translator
 
 **Instant OCR translation for anything on your screen — no copy-paste required.**
 
+[![CI](https://github.com/Kushisusumita/screen-translator/actions/workflows/ci.yml/badge.svg)](https://github.com/Kushisusumita/screen-translator/actions/workflows/ci.yml)
 [![Release](https://github.com/Kushisusumita/screen-translator/actions/workflows/release.yml/badge.svg)](https://github.com/Kushisusumita/screen-translator/actions/workflows/release.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Platform: Windows](https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D4?logo=windows)](https://github.com/Kushisusumita/screen-translator/releases)
+[![Platform: Windows | macOS | Linux](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-555555)](https://github.com/Kushisusumita/screen-translator/releases)
 [![Built with Rust](https://img.shields.io/badge/Built%20with-Rust%201.75%2B-CE422B?logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![GitHub stars](https://img.shields.io/github/stars/Kushisusumita/screen-translator?style=flat&color=yellow)](https://github.com/Kushisusumita/screen-translator/stargazers)
-[![GitHub issues](https://img.shields.io/github/issues/Kushisusumita/screen-translator)](https://github.com/Kushisusumita/screen-translator/issues)
-[![GitHub last commit](https://img.shields.io/github/last-commit/Kushisusumita/screen-translator)](https://github.com/Kushisusumita/screen-translator/commits/main)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-[Download](#download) · [Usage](#usage) · [Build from source](#building-from-source) · [Contributing](#contributing) · [License](#license)
+[**⚡ Quick start**](#-quick-start) ·
+[**🎛️ Usage**](#-usage) ·
+[**📋 Requirements**](#-requirements) ·
+[**🛠️ Build**](#-building-from-source) ·
+[**📄 License**](#-license)
 
 </div>
 
 ---
 
-## What it does
+## 🎯 What it does
 
-Press a global hotkey, drag a rectangle around any on-screen text (games, videos, PDFs, anything), and a full-screen translation overlay appears instantly. Click anywhere or press `ESC` to dismiss it.
+Press a global hotkey, point at some text — a region you drag, a window, or the
+whole screen — and the translation appears next to it. Click anywhere or press
+`Esc` to dismiss.
 
-No browser extension. No copy-paste. Works in fullscreen apps and games.
+> 🚫 No browser extension. 📋 No copy-paste. 🎮 Works in fullscreen apps and games.
+
+Four translation engines — AI, DeepL, Yandex, Google — are tried in the order you
+set, and the first one that answers wins.
 
 ---
 
-## Features
+## ⚡ Quick start
 
-| Feature | Details |
+Pre-built binaries for **Windows x64** are on the
+[**Releases**](https://github.com/Kushisusumita/screen-translator/releases) page —
+no installer, just run the executable. **macOS** and **Linux** build from source:
+
+```bash
+# 1. Build it
+cargo build --release
+
+# 2. Run it — it lives in the tray / menu bar, not on the taskbar
+./target/release/screen-translator
+```
+
+1. 🔔 The app starts silently in the **system tray** (Windows/Linux) or the
+   **menu bar** (macOS).
+2. ⌨️ Press **`Ctrl+T`** anywhere on screen.
+3. ❄️ The screen **freezes and dims**. Drag a rectangle around the text — or
+   press `Tab` to switch to window or full-screen mode.
+4. 🖱️ Release the mouse. The translation appears next to the selection.
+5. ✖️ **Click away** or press **`Esc`** to close it.
+
+---
+
+## 🎛️ Usage
+
+Right-click the tray icon — left-click on macOS — for the capture modes,
+**Settings** and **Exit**.
+
+### Capture keys
+
+| Key | Does |
 |---|---|
-| **Global hotkey** | Default `Ctrl+T` — configurable, works everywhere including fullscreen |
-| **Region selection** | Freeze-frame overlay with live selection rectangle and size label |
-| **OCR** | Yandex OCR API with automatic language detection |
-| **Translation** | Yandex web · Yandex API · Google Translate — tried in order, first success wins |
-| **Full-screen overlay** | Semi-transparent backdrop, text at top-left, scrollable if long |
-| **System tray only** | Zero taskbar presence, minimal CPU/RAM footprint |
-| **Clipboard** | Optional: copy translation automatically on each capture |
-| **Autostart** | Optional Windows startup entry |
-| **12 languages** | EN · RU · DE · FR · ES · ZH · JA · KO · AR · PT · IT · TR |
+| `Ctrl+T` | 🖼️ Capture a region you drag |
+| `Ctrl+Shift+W` | 🪟 Capture a window you point at |
+| `Ctrl+Shift+S` | 🖥️ Capture the whole screen |
+| `Tab` | 🔄 Switch capture mode without starting over |
+| `Space` (held) | ✋ Move the whole selection instead of resizing it |
+| **Right click** | 🧹 Throw the selection away and start a new one |
+| `Esc` | 🚪 Abandon the capture entirely |
+
+A crosshair follows the pointer with a live **X / Y readout in captured
+pixels** — the same unit as the size badge and the image that comes back, so
+what you read is what you get.
+
+### Handy settings
+
+| Setting | Where | Default |
+|---|---|---|
+| 🪟 Result view — popup · over the original · window | *Appearance* | Popup |
+| 📌 Keep the result window on top | *Appearance → Result window* | Off |
+| 🫥 Close the result when you click away | *Appearance → Result window* | **On** |
+| 🔔 Notify about new versions | *About → Updates* | **On** |
+| 📋 Copy the translation to the clipboard | *General* | Off |
+| 🔇 Hide the tray icon (hotkeys keep working) | *General* | Off |
+| 🤖 AI endpoint, model and token | *Engine → AI translator* | — |
+
+**Test connection** on the engine page sends one short translation and reports
+what came back, so a wrong key or model shows up immediately instead of at the
+next capture.
+
+### Command line
+
+```bash
+screen-translator --settings          # open the settings window on launch
+screen-translator --settings engine   # open it straight on a given page
+screen-translator --help              # list the options
+```
+
+Pages: `general`, `keys`, `languages`, `engine`, `appearance`, `logs`, `about`.
+
+> 🌏 The interface is in Russian. English section names are what the command line
+> takes, and are used here for the settings paths.
 
 ---
 
-## Download
+## 📋 Requirements
 
-Pre-built binaries for Windows x64 are on the [**Releases**](https://github.com/Kushisusumita/screen-translator/releases) page.
+- 💻 Windows 10 or 11 (x64), macOS 13+, or a Linux desktop (X11, or Wayland with
+  the screencast portal)
+- 🌐 Internet connection, unless you point the AI engine at a local model
 
-No installer — just run `screen-translator.exe`.
+<details>
+<summary>🍎 <b>macOS</b> — two permissions, asked for on first use</summary>
+
+In *System Settings → Privacy & Security*:
+
+- **Screen Recording** — without it every capture comes back blank;
+- **Accessibility** — only if a global shortcut refuses to fire.
+
+The app runs as a **menu-bar agent**: no Dock icon, and — the reason it matters —
+no Space of its own, so the capture overlay appears over the full-screen app you
+are actually looking at instead of switching you away from it.
+
+</details>
+
+<details>
+<summary>🐧 <b>Linux</b> — optional desktop services</summary>
+
+- a **Secret Service** (GNOME Keyring, KWallet) for token encryption;
+- an **appindicator-capable panel** for the tray icon;
+- **libnotify** (`notify-send`) for update notices;
+- **speech-dispatcher** (`spd-say`) for read-aloud.
+
+Missing any of them is not fatal: the app says so in the settings window and
+keeps the shortcuts working.
+
+</details>
 
 ---
 
-## Usage
-
-1. The app starts silently in the **system tray** (near the clock).
-2. Press **`Ctrl+T`** (or your configured hotkey) anywhere on screen.
-3. The screen **freezes and dims**. Drag a rectangle around the text you want translated.
-4. Release the mouse. A **full-screen overlay** appears with the translation at the top-left.
-5. **Click anywhere** on the overlay or press **`ESC`** to close it.
-
-**Right-click the tray icon → Settings** to change the hotkey, language pair, or other options.
-
----
-
-## Requirements
-
-- Windows 10 or 11 (x64)
-- Internet connection (Yandex OCR, Yandex Translate, Google Translate)
-
----
-
-## Building from Source
+## 🛠️ Building from source
 
 ### Prerequisites
 
-- [Rust](https://rustup.rs/) 1.75+ stable toolchain
-- Visual Studio Build Tools with the **MSVC** compiler and Windows SDK
+- 🦀 [Rust](https://rustup.rs/) 1.75+ stable toolchain
+- 🪟 **Windows** — Visual Studio Build Tools with the **MSVC** compiler and Windows SDK
+- 🍎 **macOS** — Xcode command line tools (`xcode-select --install`)
+- 🐧 **Linux** — the desktop development headers:
+
+```bash
+sudo apt install pkg-config clang libclang-dev libgtk-3-dev \
+  libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-xfixes0-dev \
+  libxkbcommon-dev libwayland-dev libgl1-mesa-dev \
+  libayatana-appindicator3-dev libpipewire-0.3-dev libdbus-1-dev \
+  libgbm-dev libxdo-dev
+```
 
 ### Steps
 
 ```bash
-git clone https://github.com/Kushisusumita/screen-translator.git
-cd screen-translator
 cargo build --release
 ```
 
-Binary output: `target/release/screen-translator.exe`
+Binary output: `target/release/screen-translator` (`.exe` on Windows)
 
-> Commit `Cargo.lock` to your fork so CI builds are reproducible.
-
----
-
-## Project Structure
-
-The codebase follows **Feature-Sliced Design (FSD)** and **SOLID** principles:
-
-```
-src/
-├── main.rs                   # Entry point — 1×1 host window, eframe bootstrap
-├── app/mod.rs                # App orchestrator (eframe::App impl)
-├── entities/                 # Pure data types with no side-effects
-│   ├── language.rs           #   Language enum + ISO codes
-│   └── settings.rs           #   Settings struct
-├── features/                 # Independent vertical slices
-│   ├── capture/              #   GDI screenshot + fullscreen overlay UI
-│   ├── hotkey/               #   Win32 global hotkey registration thread
-│   ├── settings/             #   Settings persistence (TOML) + settings UI
-│   ├── tooltip/              #   Full-screen translation overlay rendering
-│   ├── tray/                 #   System tray icon + context menu
-│   └── translation/          #   OCR → translate pipeline
-│       ├── pipeline.rs       #     Public entry point: run_pipeline(jpeg, src, tgt)
-│       ├── ocr.rs            #     Yandex OCR API
-│       ├── translator.rs     #     Yandex web · Yandex API · Google fallback chain
-│       └── client.rs         #     Shared HTTP client + session token generation
-└── shared/                   # Cross-cutting utilities
-    ├── error.rs              #   AppError with From impls for all used error types
-    └── utils/                #   Clipboard, autostart helpers
+```bash
+cargo test              # unit tests, no display needed
+cargo test -- --ignored # capture checked against the real screen
 ```
 
-**Layer rules:** `app` → `features` → `entities` → `shared`. Features never import from each other or from `app`.
+> 🤖 CI builds and tests on **Windows, macOS and Linux** on every push, so the
+> platform split cannot quietly rot. Releases are cut from `main` only.
 
 ---
 
-## Contributing
-
-Contributions, issues, and pull requests are welcome and encouraged.
-
-**To contribute:**
-
-1. Fork the repository
-2. Create a feature branch: `git checkout -b feat/my-improvement`
-3. Commit using [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix:`, `docs:`, etc.
-4. Open a pull request with a clear description of what and why
-
-**You are explicitly allowed to:**
-- Fork this project and modify it for any purpose, including commercial use (per MIT License)
-- Submit PRs with new languages, translation backends, UI improvements, bug fixes, or platform support
-- Redistribute modified versions as long as the original MIT license and copyright notice are retained
-
-There is no formal contributor agreement beyond the MIT license itself. By submitting a PR, you agree that your contribution will be licensed under MIT.
-
-**Good first issues:**
-- Add a new translation backend
-- Improve OCR language detection fallback
-- Add keyboard navigation to the overlay
-- Package a proper Windows installer
-
----
-
-## Versioning
+## 🔖 Versioning
 
 Releases are created automatically on every push to `main`:
 
@@ -160,27 +193,33 @@ Releases are created automatically on every push to `main`:
 
 ---
 
-## Disclaimer
+## ⚠️ Disclaimer
 
 > **This software is provided "as is", without warranty of any kind.**
 
-- The author makes **no guarantees** about accuracy of translations, OCR recognition quality, or service availability (Yandex, Google).
+- The author makes **no guarantees** about accuracy of translations, OCR recognition quality, or service availability.
 - The author is **not liable** for any damage, data loss, or consequences arising from use or inability to use this software.
 - This project uses **unofficial, undocumented APIs** of third-party services. These may break, change, or become unavailable at any time without notice.
 - The author has **no obligation** to fix bugs, add features, respond to issues, maintain compatibility, or continue development of this project in any form.
-- Use of third-party translation and OCR services is subject to their respective **Terms of Service**. You are responsible for ensuring your use complies with those terms.
+- Use of third-party translation, OCR and AI services is subject to their respective **Terms of Service**, and you are billed by them directly for any key you configure here. You are responsible for ensuring your use complies with those terms.
 - This tool is intended for **personal, non-commercial use** as a productivity aid. The author is not responsible for any misuse.
 
 By using this software you accept these terms.
 
 ---
 
-## Author
+## 👤 Author
 
 [@クシススミタ](https://github.com/Kushisusumita)
 
 ---
 
-## License
+## 📄 License
 
 [MIT](LICENSE) © 2026 クシススミタ
+
+<div align="center">
+
+**⭐ If this saved you some copy-paste, a star is welcome.**
+
+</div>
