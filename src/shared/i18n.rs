@@ -111,10 +111,6 @@ impl Lang {
         Lang::ALL.into_iter().find(|l| l.code() == primary)
     }
 
-    /// Whether this language needs a CJK face loaded to render at all.
-    pub const fn needs_cjk(self) -> bool {
-        matches!(self, Lang::Ja | Lang::Zh | Lang::Ko)
-    }
 }
 
 /// Current language, as a `Lang` discriminant. Read on every string lookup, so

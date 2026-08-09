@@ -474,16 +474,15 @@ pub fn build_fonts() -> FontDefinitions {
     if has_ui {
         prop.insert(0, "ui".to_owned());
     }
-    // A CJK interface language wants these faces *first*: the Latin UI font
-    // has no kana, hanzi or hangul, so leaving it in front means a miss on
-    // every glyph, and the few characters it does cover come out in a
-    // different face from the rest of the line.
-    if crate::shared::i18n::current().needs_cjk() {
-        for (i, key) in cjk.iter().enumerate() {
-            prop.insert(i, key.clone());
-        }
-    } else {
-        prop.extend(cjk.iter().cloned());
+    // Straight after the UI face, ahead of egui's own fallbacks — never in
+    // front of it. egui walks the list per glyph, so Latin and Cyrillic are
+    // served by the UI font and only kana, hanzi and hangul fall through to
+    // these. Putting them first instead renders Cyrillic in full-width CJK
+    // metrics, which is how "Русский" in the language list ends up spaced
+    // out like a ransom note on a Japanese interface.
+    let at = usize::from(has_ui);
+    for (i, key) in cjk.iter().enumerate() {
+        prop.insert(at + i, key.clone());
     }
 
     let mono = fonts.families.entry(FontFamily::Monospace).or_default();

@@ -643,7 +643,7 @@ impl App {
             },
         );
 
-        self.apply_settings_changes(settings, out, install_url);
+        self.apply_settings_changes(ctx, settings, out, install_url);
 
         if close {
             self.settings_open = false;
@@ -658,6 +658,7 @@ impl App {
 
     fn apply_settings_changes(
         &mut self,
+        ctx: &Context,
         next: Settings,
         out: crate::features::settings::ui::SettingsOutput,
         install_url: Option<String>,
@@ -685,6 +686,12 @@ impl App {
                 .or_else(crate::shared::i18n::detect_system)
                 .unwrap_or(crate::shared::i18n::Lang::En);
             crate::shared::i18n::set(language);
+            // Fonts are chosen for the language, so they have to be rebuilt
+            // with it. Without this, an app started in Japanese keeps the CJK
+            // face at the front of the family after a switch to Russian, and
+            // Cyrillic comes out in full-width CJK metrics — letters spaced
+            // like a ransom note.
+            ctx.set_fonts(crate::ui::theme::build_fonts());
             self.tray.update_hotkeys(self.settings.hotkeys);
         }
         if theme_changed {
