@@ -156,9 +156,10 @@ keeps the shortcuts working.
 - 🐧 **Linux** — the desktop development headers:
 
 ```bash
-sudo apt install libgtk-3-dev libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev \
-  libxcb-xfixes0-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev \
-  libayatana-appindicator3-dev
+sudo apt install pkg-config clang libclang-dev libgtk-3-dev \
+  libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-xfixes0-dev \
+  libxkbcommon-dev libwayland-dev libgl1-mesa-dev \
+  libayatana-appindicator3-dev libpipewire-0.3-dev libdbus-1-dev
 ```
 
 ### Steps

@@ -88,6 +88,8 @@ windows = { version = "0.58", features = [
     "Win32_Security_Cryptography",
     "Win32_UI_Shell",
     "Win32_System_Threading",
+    # GetUserDefaultLocaleName, for the interface language at first launch.
+    "Win32_Globalization",
 ] }
 winreg = "0.52"
 # Action Center toasts for the "update available" notification.

@@ -31,16 +31,20 @@ jobs:
           # Cargo.lock is not committed, so the manifest is what keys the cache.
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.toml') }}
 
-      # Wayland/X11 for the window, GTK for the tray icon, xcb for capture.
+      # Wayland/X11 for the window, GTK for the tray icon, xcb for capture, and
+      # PipeWire for the Wayland screencast portal — xcap binds to all three, and
+      # its bindgen step needs libclang.
       - name: System libraries
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
+            pkg-config clang libclang-dev \
             libgtk-3-dev \
             libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-xfixes0-dev \
             libxkbcommon-dev libwayland-dev libgl1-mesa-dev \
-            libayatana-appindicator3-dev
+            libayatana-appindicator3-dev \
+            libpipewire-0.3-dev libdbus-1-dev
 
       - name: Build
         run: cargo build
