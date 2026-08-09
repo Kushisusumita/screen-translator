@@ -159,7 +159,8 @@ keeps the shortcuts working.
 sudo apt install pkg-config clang libclang-dev libgtk-3-dev \
   libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-xfixes0-dev \
   libxkbcommon-dev libwayland-dev libgl1-mesa-dev \
-  libayatana-appindicator3-dev libpipewire-0.3-dev libdbus-1-dev
+  libayatana-appindicator3-dev libpipewire-0.3-dev libdbus-1-dev \
+  libgbm-dev libxdo-dev
 ```
 
 ### Steps
