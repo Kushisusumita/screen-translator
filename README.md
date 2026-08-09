@@ -84,8 +84,8 @@ what you read is what you get.
 
 | Setting | Where | Default |
 |---|---|---|
-| 🪟 Result view — popup · over the original · window | *Appearance* | Popup |
-| 📌 Keep the result window on top | *Appearance → Result window* | Off |
+| 🪟 Result view — popup · over the original · window | *Appearance* | **Over the original** |
+| 📌 Keep the result window on top | *Appearance → Result window* | **On** |
 | 🫥 Close the result when you click away | *Appearance → Result window* | **On** |
 | 🔔 Notify about new versions | *About → Updates* | **On** |
 | 📋 Copy the translation to the clipboard | *General* | Off |
@@ -106,8 +106,9 @@ screen-translator --help              # list the options
 
 Pages: `general`, `keys`, `languages`, `engine`, `appearance`, `logs`, `about`.
 
-> 🌏 The interface is in Russian. English section names are what the command line
-> takes, and are used here for the settings paths.
+> 🌏 The interface follows the system language, with fourteen to choose from in
+> *General → Interface language*. The English section names above are what the
+> command line takes.
 
 ---
 
@@ -183,13 +184,14 @@ cargo test -- --ignored # capture checked against the real screen
 
 ## 🔖 Versioning
 
-Releases are created automatically on every push to `main`:
+`Cargo.toml` is the single source of truth. A push to `main` releases whatever
+version it names — tagged `vX.Y.Z`, published as *Sakura Screen Translator
+X.Y.Z*, and reported by the app itself on the About page, so the three can never
+disagree.
 
-| Commit prefix | Version bump |
-|---|---|
-| `fix:` `docs:` `refactor:` `chore:` | Patch `0.0.x` |
-| `feat:` | Minor `0.x.0` |
-| `feat!:` `fix!:` `BREAKING CHANGE` | Major `x.0.0` |
+Cutting a release is therefore one edit: bump the version, push. If the tag
+already exists the workflow stops rather than overwrite it, so a push that
+forgot the bump fails loudly instead of quietly replacing yesterday's binaries.
 
 ---
 

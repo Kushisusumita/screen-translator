@@ -593,7 +593,7 @@ impl App {
 
         let mut builder = ViewportBuilder::default()
             .with_title(t("Sakura Screen Translator — Settings"))
-            .with_inner_size([760.0, 560.0])
+            .with_inner_size([785.0, 662.0])
             .with_min_inner_size([680.0, 460.0]);
         builder = builder.with_icon(Arc::new(load_app_icon()));
 

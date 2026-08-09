@@ -20,38 +20,33 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Compute next version
+      - name: Read the version
         id: ver
         shell: bash
         run: |
-          # Latest semver tag, or v0.0.0 if none exist
-          LATEST=$(git tag --sort=-v:refname \
-            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
-            | head -1 || true)
-          [ -z "$LATEST" ] && LATEST="v0.0.0"
-          echo "Latest tag: $LATEST"
-
-          # Split into components
-          VER=${LATEST#v}
-          MAJOR=${VER%%.*}; REST=${VER#*.}
-          MINOR=${REST%%.*}; PATCH=${REST#*.}
-
-          # Read the latest commit message
-          MSG=$(git log -1 --pretty=%B)
-          echo "Commit message: $MSG"
-
-          # Determine bump
-          if echo "$MSG" | grep -qE '^(feat|fix|refactor|perf|build|ci)!:|BREAKING[ -]CHANGE'; then
-            MAJOR=$((MAJOR+1)); MINOR=0; PATCH=0
-          elif echo "$MSG" | grep -qE '^feat(\([^)]*\))?:'; then
-            MINOR=$((MINOR+1)); PATCH=0
-          else
-            PATCH=$((PATCH+1))
+          # Cargo.toml is the single source of truth. Deriving the tag from the
+          # previous tag instead — which this used to do — let the released
+          # version drift away from the one the program reports about itself:
+          # v0.0.2 on the release page, 0.2.0 in the About page.
+          VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          if [ -z "$VERSION" ]; then
+            echo "No version in Cargo.toml" >&2
+            exit 1
           fi
+          echo "Version: $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
 
-          NEW="v${MAJOR}.${MINOR}.${PATCH}"
-          echo "New version: $NEW"
-          echo "tag=$NEW" >> "$GITHUB_OUTPUT"
+      - name: Refuse to publish a version that already exists
+        shell: bash
+        run: |
+          # Bumping Cargo.toml is now the act of cutting a release, so a push
+          # that forgot to is a mistake worth failing on rather than silently
+          # overwriting yesterday's binaries.
+          if git rev-parse "refs/tags/${{ steps.ver.outputs.tag }}" >/dev/null 2>&1; then
+            echo "Tag ${{ steps.ver.outputs.tag }} already exists — bump the version in Cargo.toml." >&2
+            exit 1
+          fi
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -72,6 +67,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
-          name: "Screen Translator ${{ steps.ver.outputs.tag }}"
+          name: "Sakura Screen Translator ${{ steps.ver.outputs.version }}"
           generate_release_notes: true
           files: target/release/screen-translator.exe
