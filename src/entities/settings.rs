@@ -776,7 +776,7 @@ pub const AI_PRESETS: &[AiPreset] = &[
         name: "OpenRouter",
         protocol: AiProtocol::OpenAi,
         base_url: "https://openrouter.ai/api/v1",
-        model: "anthropic/claude-sonnet-4.5",
+        model: "anthropic/claude-sonnet-5.5",
         needs_key: true,
     },
     AiPreset {
