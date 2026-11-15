@@ -118,18 +118,37 @@ fn language_clause(source: Language) -> String {
 /// exists because the alternative showed up in output: models like to explain
 /// themselves, wrap results in quotes, translate code identifiers, and
 /// helpfully "fix" numbers.
+///
+/// Two of them are about fidelity, and say why. Left to itself a model
+/// translates the way a cautious editor would: a curse becomes "darn", slang
+/// becomes standard speech, a moan or a stutter is dropped as noise, a
+/// stage direction in asterisks is tidied away. Each of those is a small lie
+/// about the story — the reader comes away with a milder scene and a blander
+/// character than the author wrote. A translator's job is the opposite, and
+/// the prompt says so in as many words rather than hoping.
 fn shared_rules(target: Language) -> String {
     format!(
         "- The text comes from a screen: a game, an application, a web page or a video. \
 Translate it the way a professional localiser would — natural, idiomatic {to}, with the \
 register the original uses. Dialogue stays dialogue; an interface label stays short.\n\
+- Be faithful to what the author wrote, not to what would be polite. The reader chose this \
+text and needs the story, the characters and the tone exactly as they were intended; a \
+softened translation misleads them. So keep the full force of the original: profanity \
+stays profanity of the same strength, an insult stays an insult, slang becomes the slang \
+a native speaker of {to} would really use, and crude, sexual, violent or otherwise adult \
+content is translated as it is written — not toned down, not euphemised, not summarised, \
+not skipped and not remarked on.\n\
+- Carry over everything that shows how a line is delivered: interjections, moans, gasps, \
+cries, laughter and other vocal sounds (spelled the way {to} writes them), stutters, \
+drawn-out letters, ellipses and emphasis, and any description of an emotion or an action \
+given in asterisks or brackets.\n\
 - Keep names of characters, places, items and brands as they are unless they have an \
 established {to} form.\n\
 - Leave code identifiers, file paths, URLs, email addresses, version numbers and key names \
 (Esc, Enter, WASD) exactly as they are. Keep all numbers and units unchanged.\n\
 - If a fragment is already in {to}, repeat it unchanged rather than paraphrasing it.\n\
-- Never refuse and never ask a question; if the text is unintelligible, return your best \
-reading of it.",
+- Do not ask questions and do not add remarks of your own. If part of the text is \
+unintelligible, give your best reading of it.",
         to = target.english_name(),
     )
 }
@@ -882,6 +901,23 @@ mod tests {
     fn auto_source_does_not_claim_a_language() {
         let p = system_prompt(Language::Auto, Language::Ru, "");
         assert!(p.contains("the language you detect"));
+    }
+
+    #[test]
+    fn both_prompts_ask_for_a_faithful_translation_rather_than_a_polite_one() {
+        for p in [
+            system_prompt(Language::Ja, Language::Ru, ""),
+            vision_prompt(Language::Ja, Language::Ru, ""),
+        ] {
+            // The strength of the language, and the sounds and stage directions
+            // a cautious model drops as noise.
+            assert!(p.contains("profanity stays profanity"), "{p}");
+            assert!(p.contains("not toned down"), "{p}");
+            assert!(p.contains("moans"), "{p}");
+            assert!(p.contains("asterisks or brackets"), "{p}");
+            // In the language the reader asked for, by name.
+            assert!(p.contains("a native speaker of Russian"), "{p}");
+        }
     }
 
     #[test]
