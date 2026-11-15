@@ -583,6 +583,7 @@ impl ResultUi {
                     },
                 );
                 native::place(TITLE, window);
+                native::reveal(ctx, self.frames);
 
                 if self.texture.is_none() {
                     if let Some(shot) = &self.shot {

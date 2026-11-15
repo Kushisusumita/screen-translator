@@ -38,6 +38,26 @@ pub const QUIET_WINDOWS: bool = cfg!(windows);
 /// [`Behaviour::translucent`] — and the toolkit is left out of it.
 pub const TOOLKIT_TRANSPARENCY: bool = !cfg!(windows);
 
+/// Shows a window that was created hidden, once it has had a frame in which
+/// to be set up — given the word not to animate, most of all.
+///
+/// `frames_so_far` is how many frames the window has already been through.
+/// Call it from inside the window's own viewport, every frame.
+///
+/// The builder's `with_visible(true)` on a later frame ought to do this and
+/// does not. egui 0.29 decides whether to pass the change on by comparing the
+/// new value with the window's *active* flag rather than its visible one: a
+/// window created hidden and inactive is shown by accident, and one created
+/// hidden and active — the capture overlay, which needs the keyboard — is
+/// never shown at all. Every shortcut then did nothing, while an invisible
+/// overlay sat waiting for a selection nobody could make. So it is said
+/// outright, as a command, and twice in case the first arrives too early.
+pub fn reveal(ctx: &egui::Context, frames_so_far: u32) {
+    if QUIET_WINDOWS && (1..=2).contains(&frames_so_far) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+    }
+}
+
 /// Applies `behaviour` to the window with this title. Idempotent, and cheap
 /// enough to call from every frame — which is how it has to be called, since
 /// the window does not exist yet on the frame that asks for it.

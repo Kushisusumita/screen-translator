@@ -103,6 +103,7 @@ impl ResultUi {
                         translucent: true,
                     },
                 );
+                native::reveal(ctx, self.frames);
                 let presence = self.presence(ctx);
 
                 chrome::transparent_panel(ctx, |ui| {

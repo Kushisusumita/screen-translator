@@ -406,6 +406,7 @@ impl App {
                     },
                 );
                 native::place(overlay::TITLE, desktop);
+                native::reveal(ctx, state.frames);
 
                 // Without focus the overlay never sees a key press, and Esc does
                 // nothing however clearly the hint advertises it. macOS goes
