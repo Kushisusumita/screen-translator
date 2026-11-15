@@ -194,6 +194,27 @@ fn enable_dpi_awareness() {
     }
 }
 
+/// What the one-copy-at-a-time lock is called.
+///
+/// One copy per profile, not one per machine: a copy pointed at its own
+/// folder with `SAKURA_CONFIG_DIR` is a second profile, and is allowed to run
+/// beside the ordinary one. Without this the second profile the README
+/// promises could only ever be started once the first had been closed.
+#[cfg(windows)]
+fn instance_name() -> String {
+    use std::hash::{Hash, Hasher};
+
+    const NAME: &str = "Local\\SakuraScreenTranslator";
+    match std::env::var_os(shared::paths::DATA_DIR_VAR).filter(|dir| !dir.is_empty()) {
+        Some(dir) => {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            dir.hash(&mut hasher);
+            format!("{NAME}-{:016x}", hasher.finish())
+        }
+        None => NAME.to_string(),
+    }
+}
+
 /// Holds a named mutex for the lifetime of the process.
 struct SingleInstance {
     #[cfg(windows)]
@@ -208,7 +229,7 @@ impl SingleInstance {
             use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
             use windows::Win32::System::Threading::CreateMutexW;
 
-            let name: Vec<u16> = "Local\\SakuraScreenTranslator\0".encode_utf16().collect();
+            let name: Vec<u16> = instance_name().encode_utf16().chain(Some(0)).collect();
             let handle = CreateMutexW(None, true, PCWSTR(name.as_ptr())).ok()?;
             if GetLastError() == ERROR_ALREADY_EXISTS {
                 let _ = CloseHandle(handle);
