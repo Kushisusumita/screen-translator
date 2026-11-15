@@ -134,14 +134,6 @@ impl Platform {
         self.format_hotkey_with(modifiers, key_name, false)
     }
 
-    /// The copy shortcut, as this platform's users know it.
-    pub const fn copy_shortcut(self) -> &'static str {
-        match self {
-            Platform::Windows => "Ctrl+C",
-            Platform::MacOs => "⌘C",
-        }
-    }
-
     /// The space bar, named the way the rest of the OS names it.
     pub fn space_key(self) -> &'static str {
         t("Space")
@@ -303,12 +295,6 @@ mod tests {
             Platform::Windows.format_hotkey(with_norepeat, "T"),
             "Ctrl+T"
         );
-    }
-
-    #[test]
-    fn each_platform_names_the_copy_shortcut_its_own_way() {
-        assert_eq!(Platform::Windows.copy_shortcut(), "Ctrl+C");
-        assert_eq!(Platform::MacOs.copy_shortcut(), "⌘C");
     }
 
     #[test]

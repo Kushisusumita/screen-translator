@@ -1,22 +1,27 @@
 //! Yandex Translate.
 //!
-//! The original implementation went straight to scraping `translate.yandex.ru`
-//! and, when that failed, launched a **headless Chrome per translation** and
-//! polled it for up to 30 seconds. Since the page is a client-rendered SPA the
-//! scrape essentially always failed, so the common path was: browser launch,
-//! several seconds of polling, then fall through to Google anyway.
+//! This used to call the endpoint the web page itself uses, with a session id
+//! made up on the spot. Yandex now ties that endpoint to a session issued by
+//! the page — which sits behind a captcha for anything that is not a browser —
+//! so every call came back `405 Session is invalid`. The page scrape that was
+//! kept as a second chance fetched the captcha instead of the translator. The
+//! upshot was that "Yandex" in the engine list quietly did nothing: each
+//! translation paid for two failed round trips and was then done by Google.
 //!
-//! The order is inverted here. The JSON endpoint the web client itself calls
-//! comes first and answers in a couple of hundred milliseconds. Scraping is kept
-//! as a second chance, and the browser is now opt-in and no longer leaks its
-//! process when the poll times out.
+//! The mobile endpoint asks for no page session, only a client id, and it takes
+//! a *list* of texts — one entry per paragraph in, one translation per entry
+//! out. That is exactly the shape the in-place view needs, so paragraphs go out
+//! as separate entries rather than as one string with line breaks to be hoped
+//! for on the way back.
+//!
+//! The headless browser remains as an opt-in last resort.
 
 use std::time::Duration;
 
 use serde_json::Value;
 use tracing::{debug, info, warn};
 
-use super::{chunk_text, TranslateRequest, MAX_CHUNK_CHARS};
+use super::{LinePlan, TranslateRequest, MAX_CHUNK_CHARS};
 use crate::entities::language::Language;
 use crate::features::translation::client::{HTTP, YANDEX_SESSION};
 use crate::shared::error::AppError;
@@ -25,37 +30,35 @@ use crate::shared::logging::clip;
 
 const API: &str = "https://translate.yandex.net/api/v1/tr.json/translate";
 const WEB: &str = "https://translate.yandex.ru/";
+/// Entries per request. The endpoint takes more; a whole screen of text is
+/// better spread over a few quick calls than risked on one large one.
+const MAX_TEXTS_PER_REQUEST: usize = 40;
 
 pub async fn translate(req: &TranslateRequest, allow_headless: bool) -> Result<String, AppError> {
-    let mut errors = Vec::new();
+    let api_error = match api_translate(req).await {
+        Ok(text) if !text.trim().is_empty() => return Ok(text),
+        Ok(_) => AppError::Other(t("API: empty response").to_string()),
+        Err(e) => e,
+    };
 
-    match api_translate(req).await {
-        Ok(t) if !t.trim().is_empty() => return Ok(t),
-        Ok(_) => errors.push(t("API: empty response").to_string()),
+    if !allow_headless {
+        return Err(api_error);
+    }
+
+    debug!(error = %api_error, "Yandex API failed, trying the browser");
+    match headless(req).await {
+        Ok(text) if !text.trim().is_empty() => Ok(text),
+        Ok(_) => Err(AppError::Other(
+            t("headless: empty response").to_string(),
+        )),
         Err(e) => {
-            debug!(error = %e, "Yandex JSON API failed, falling back to page scrape");
-            errors.push(format!("API: {e}"));
+            warn!(api = %api_error, browser = %e, "Both Yandex paths failed");
+            Err(e)
         }
     }
-
-    match web_scrape(req).await {
-        Ok(t) if !t.trim().is_empty() => return Ok(t),
-        Ok(_) => errors.push(t("web: empty response").to_string()),
-        Err(e) => errors.push(format!("web: {e}")),
-    }
-
-    if allow_headless {
-        match headless(req).await {
-            Ok(t) if !t.trim().is_empty() => return Ok(t),
-            Ok(_) => errors.push(t("headless: empty response").to_string()),
-            Err(e) => errors.push(format!("headless: {e}")),
-        }
-    }
-
-    Err(AppError::Other(errors.join("; ")))
 }
 
-// ── Primary: the endpoint the web client uses ────────────────────────────────
+// ── The mobile endpoint ──────────────────────────────────────────────────────
 
 fn lang_pair(req: &TranslateRequest) -> String {
     match req.source {
@@ -68,23 +71,25 @@ fn lang_pair(req: &TranslateRequest) -> String {
 
 async fn api_translate(req: &TranslateRequest) -> Result<String, AppError> {
     let lang = lang_pair(req);
-    let id = format!("{}-0-0", YANDEX_SESSION.text_sid);
-    let chunks = chunk_text(&req.text, MAX_CHUNK_CHARS);
+    let plan = LinePlan::new(&req.text, MAX_CHUNK_CHARS);
+    let mut translated: Vec<String> = Vec::with_capacity(plan.pieces.len());
 
-    let mut out = String::with_capacity(req.text.len());
-    for (i, chunk) in chunks.iter().enumerate() {
+    for batch in plan.batches(MAX_CHUNK_CHARS, MAX_TEXTS_PER_REQUEST) {
+        let mut form: Vec<(&str, &str)> = plan.pieces[batch.clone()]
+            .iter()
+            .map(|piece| ("text", piece.as_str()))
+            .collect();
+        form.push(("lang", lang.as_str()));
+
         let resp = HTTP
             .post(API)
-            .query(&[("id", id.as_str()), ("srv", "tr-text")])
-            .header("Accept", "*/*")
-            .header("Referer", "https://translate.yandex.com/")
-            .header("Origin", "https://translate.yandex.com")
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .form(&[
-                ("text", chunk.as_str()),
-                ("lang", lang.as_str()),
-                ("options", "4"),
+            .query(&[
+                ("ucid", YANDEX_SESSION.ucid.as_str()),
+                ("srv", "android"),
+                ("format", "text"),
             ])
+            .header("Accept", "*/*")
+            .form(&form)
             .send()
             .await?;
 
@@ -99,18 +104,22 @@ async fn api_translate(req: &TranslateRequest) -> Result<String, AppError> {
             )));
         }
 
-        let piece = parse_api(&body)?;
-        if i > 0 && !out.ends_with(' ') && !piece.starts_with(' ') {
-            out.push(' ');
+        let texts = parse_api(&body)?;
+        if texts.len() != batch.len() {
+            return Err(AppError::Other(
+                t("The service answered with a different number of lines").to_string(),
+            ));
         }
-        out.push_str(&piece);
+        translated.extend(texts);
     }
 
-    Ok(out)
+    plan.assemble(&translated).ok_or_else(|| {
+        AppError::Other(t("The service answered with a different number of lines").to_string())
+    })
 }
 
-/// `{"code":200,"lang":"en-ru","text":["…"]}`
-fn parse_api(body: &str) -> Result<String, AppError> {
+/// `{"code":200,"lang":"en-ru","text":["…","…"]}` — one entry per text sent.
+fn parse_api(body: &str) -> Result<Vec<String>, AppError> {
     let json: Value = serde_json::from_str(body).map_err(|e| {
         AppError::Other(t("Unrecognized response: {error}").replace("{error}", &e.to_string()))
     })?;
@@ -134,279 +143,14 @@ fn parse_api(body: &str) -> Result<String, AppError> {
         .and_then(Value::as_array)
         .ok_or_else(|| AppError::Other(t("The response has no text field").to_string()))?;
 
-    let text: Vec<&str> = parts.iter().filter_map(Value::as_str).collect();
-    if text.is_empty() {
+    let texts: Vec<String> = parts
+        .iter()
+        .map(|p| p.as_str().unwrap_or_default().to_string())
+        .collect();
+    if texts.is_empty() {
         return Err(AppError::Other(t("The text array is empty").to_string()));
     }
-    Ok(text.join("\n"))
-}
-
-// ── Second chance: parse whatever the page ships ─────────────────────────────
-
-async fn web_scrape(req: &TranslateRequest) -> Result<String, AppError> {
-    let src = match req.source {
-        Language::Auto => "auto".to_string(),
-        s => s.code().to_string(),
-    };
-    let url = format!(
-        "{WEB}?source_lang={}&target_lang={}&text={}",
-        src,
-        req.target.code(),
-        urlencoding::encode(&req.text)
-    );
-
-    let resp = HTTP
-        .get(&url)
-        .header(
-            "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        )
-        .header("Accept-Language", "ru-RU,ru;q=0.9,en;q=0.8")
-        .header("Referer", WEB)
-        .send()
-        .await?;
-
-    let status = resp.status();
-    let html = resp.text().await?;
-    debug!(
-        status = status.as_u16(),
-        html_len = html.len(),
-        "Yandex page"
-    );
-
-    if !status.is_success() {
-        return Err(AppError::Other(format!("HTTP {status}")));
-    }
-
-    for marker in GLOBAL_VARS {
-        if let Some(t) = extract_from_global_var(&html, marker) {
-            if !t.is_empty() {
-                return Ok(t);
-            }
-        }
-    }
-
-    if let Some(t) = scan_all_scripts(&html) {
-        if !t.is_empty() {
-            return Ok(t);
-        }
-    }
-
-    Err(AppError::Other(
-        t("No translation found in the HTML").to_string(),
-    ))
-}
-
-const GLOBAL_VARS: &[&str] = &[
-    "window.__data=",
-    "window.__data =",
-    "window.__STORE__=",
-    "window.__STORE__ =",
-    "window.__INITIAL_STATE__=",
-    "window.__INITIAL_STATE__ =",
-    "window.__serverState=",
-    "window.__serverState =",
-    "window.__SERVER_DATA__=",
-    "window.__SERVER_DATA__ =",
-    "window.__initialData=",
-    "window.__initialData =",
-];
-
-fn extract_from_global_var(html: &str, marker: &str) -> Option<String> {
-    let start = html.find(marker)?;
-    let after = &html[start + marker.len()..];
-    let json_str = extract_json_object(after)?;
-    let v: Value = serde_json::from_str(&json_str).ok()?;
-
-    const PATHS: &[&str] = &[
-        "result.translations.0.text",
-        "translationData.result.0",
-        "translation.result",
-        "data.result",
-        "result.text",
-        "result.texts.0",
-        "translations.0.text",
-        "translation.0",
-    ];
-    for path in PATHS {
-        if let Some(t) = json_path(&v, path) {
-            return Some(strip_html(&t));
-        }
-    }
-    scan_json_for_translation(&v, 0).map(|t| strip_html(&t))
-}
-
-fn scan_all_scripts(html: &str) -> Option<String> {
-    let mut pos = 0;
-    while let Some(open) = html[pos..].find("<script") {
-        let abs_open = pos + open;
-        let tag_end = abs_open + html[abs_open..].find('>')? + 1;
-        let close = tag_end + html[tag_end..].find("</script>")?;
-        let content = &html[tag_end..close];
-        pos = close + "</script>".len();
-
-        if let Some(t) = scan_script_for_translation(content) {
-            return Some(t);
-        }
-    }
-    None
-}
-
-fn scan_script_for_translation(script: &str) -> Option<String> {
-    let mut search = script;
-    // Bounded: a 2 MB page with a `{` every other byte would otherwise turn this
-    // into a million JSON parses.
-    let mut budget = 64;
-    while budget > 0 {
-        let brace = search.find('{')?;
-        budget -= 1;
-        if let Some(json_str) = extract_json_object(&search[brace..]) {
-            if let Ok(v) = serde_json::from_str::<Value>(&json_str) {
-                if let Some(t) = scan_json_for_translation(&v, 0) {
-                    return Some(strip_html(&t));
-                }
-            }
-        }
-        // `{` is ASCII, so this index is always a char boundary.
-        search = &search[brace + 1..];
-    }
-    None
-}
-
-fn json_path(v: &Value, path: &str) -> Option<String> {
-    let mut cur = v;
-    for key in path.split('.') {
-        cur = if let Ok(idx) = key.parse::<usize>() {
-            cur.get(idx)?
-        } else {
-            cur.get(key)?
-        };
-    }
-    cur.as_str().map(str::to_string)
-}
-
-fn scan_json_for_translation(v: &Value, depth: u8) -> Option<String> {
-    if depth > 6 {
-        return None;
-    }
-    let Value::Object(map) = v else {
-        return None;
-    };
-
-    const KEYS: &[&str] = &[
-        "translation",
-        "translated",
-        "translatedText",
-        "result",
-        "text",
-        "texts",
-        "output",
-        "outputText",
-    ];
-    for key in KEYS {
-        let Some(val) = map.get(*key) else { continue };
-        if let Some(s) = val.as_str() {
-            if !s.is_empty() {
-                return Some(s.to_string());
-            }
-        }
-        if let Some(first) = val
-            .as_array()
-            .and_then(|a| a.first())
-            .and_then(Value::as_str)
-        {
-            if !first.is_empty() {
-                return Some(first.to_string());
-            }
-        }
-    }
-    map.values()
-        .find_map(|child| scan_json_for_translation(child, depth + 1))
-}
-
-fn extract_json_object(s: &str) -> Option<String> {
-    let start = s.find('{')?;
-    let bytes = s.as_bytes();
-    let mut depth = 0i32;
-    let mut in_str = false;
-    let mut escape = false;
-    for (i, &b) in bytes[start..].iter().enumerate() {
-        if escape {
-            escape = false;
-            continue;
-        }
-        match b {
-            b'\\' if in_str => escape = true,
-            b'"' => in_str = !in_str,
-            b'{' if !in_str => depth += 1,
-            b'}' if !in_str => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(s[start..start + i + 1].to_string());
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// Strips tags and decodes the handful of entities that show up in translated
-/// text.
-///
-/// The previous version used `take_while(|c| c != ';')` on the char iterator,
-/// which swallows the terminator and — for a bare `&` with no `;` anywhere
-/// after it — consumed the entire rest of the string.
-fn strip_html(html: &str) -> String {
-    let mut out = String::with_capacity(html.len());
-    let mut chars = html.chars().peekable();
-    let mut in_tag = false;
-
-    while let Some(c) = chars.next() {
-        match c {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            '&' if !in_tag => {
-                // Entities are short; look ahead a bounded distance for the `;`.
-                let mut entity = String::new();
-                let mut found = false;
-                for _ in 0..10 {
-                    match chars.peek() {
-                        Some(';') => {
-                            chars.next();
-                            found = true;
-                            break;
-                        }
-                        Some(&ch) if ch.is_ascii_alphanumeric() || ch == '#' => {
-                            entity.push(ch);
-                            chars.next();
-                        }
-                        _ => break,
-                    }
-                }
-                match (found, entity.as_str()) {
-                    (true, "amp") => out.push('&'),
-                    (true, "lt") => out.push('<'),
-                    (true, "gt") => out.push('>'),
-                    (true, "quot") => out.push('"'),
-                    (true, "apos") | (true, "#39") => out.push('\''),
-                    (true, "nbsp") => out.push(' '),
-                    (true, other) => {
-                        out.push('&');
-                        out.push_str(other);
-                        out.push(';');
-                    }
-                    (false, other) => {
-                        out.push('&');
-                        out.push_str(other);
-                    }
-                }
-            }
-            _ if !in_tag => out.push(c),
-            _ => {}
-        }
-    }
-    out.trim().to_string()
+    Ok(texts)
 }
 
 // ── Last resort: drive a real browser ────────────────────────────────────────
@@ -435,14 +179,21 @@ fn find_chromium_executable() -> Option<std::path::PathBuf> {
 
 #[cfg(not(windows))]
 fn find_chromium_executable() -> Option<std::path::PathBuf> {
-    [
+    let found = [
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
         "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
         "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
     ]
     .into_iter()
     .map(std::path::PathBuf::from)
-    .find(|p| p.exists())
+    .find(|p| p.exists());
+    if let Some(p) = &found {
+        info!(browser = %p.display(), "Found browser");
+    }
+    found
 }
 
 async fn headless(req: &TranslateRequest) -> Result<String, AppError> {
@@ -491,12 +242,9 @@ async fn headless(req: &TranslateRequest) -> Result<String, AppError> {
     })()"#;
 
     let outcome = timeout(Duration::from_secs(20), async {
-        let page = browser
-            .new_page(&url)
-            .await
-            .map_err(|e| {
-                AppError::Other(t("Opening the page: {error}").replace("{error}", &e.to_string()))
-            })?;
+        let page = browser.new_page(&url).await.map_err(|e| {
+            AppError::Other(t("Opening the page: {error}").replace("{error}", &e.to_string()))
+        })?;
         loop {
             if let Ok(val) = page.evaluate(POLL_JS).await {
                 if let Ok(Some(t)) = val.into_value::<Option<String>>() {
@@ -511,7 +259,6 @@ async fn headless(req: &TranslateRequest) -> Result<String, AppError> {
     .await;
 
     // Whatever happened above, the browser process must not survive this call.
-    // The previous version returned early on timeout and left Chrome running.
     let _ = browser.close().await;
     let _ = browser.wait().await;
     driver.abort();
@@ -555,49 +302,23 @@ mod tests {
     }
 
     #[test]
-    fn parses_a_normal_response() {
-        let body = r#"{"code":200,"lang":"en-ru","text":["Привет мир"]}"#;
-        assert_eq!(parse_api(body).unwrap(), "Привет мир");
+    fn every_entry_of_the_reply_is_kept_in_order() {
+        let body = r#"{"code":200,"lang":"en-ru","text":["Привет","мир"]}"#;
+        assert_eq!(parse_api(body).unwrap(), vec!["Привет", "мир"]);
     }
 
     #[test]
     fn an_error_code_becomes_an_error() {
-        let body = r#"{"code":400,"message":"invalid parameter: lang"}"#;
+        let body = r#"{"code":405,"message":"Session is invalid"}"#;
         let err = parse_api(body).unwrap_err().to_string();
-        assert!(err.contains("400"), "{err}");
-        assert!(err.contains("invalid parameter"), "{err}");
+        assert!(err.contains("405"), "{err}");
+        assert!(err.contains("Session is invalid"), "{err}");
     }
 
     #[test]
-    fn strip_html_decodes_known_entities() {
-        assert_eq!(strip_html("a &amp; b &lt;c&gt;"), "a & b <c>");
-    }
-
-    #[test]
-    fn a_bare_ampersand_does_not_eat_the_rest_of_the_string() {
-        // The old take_while implementation returned "Tom " here.
-        assert_eq!(strip_html("Tom & Jerry вместе"), "Tom & Jerry вместе");
-    }
-
-    #[test]
-    fn an_unknown_entity_is_left_intact() {
-        assert_eq!(strip_html("100&euro; всего"), "100&euro; всего");
-    }
-
-    #[test]
-    fn tags_are_removed_but_their_text_kept() {
-        assert_eq!(strip_html("<b>жирный</b> текст"), "жирный текст");
-    }
-
-    #[test]
-    fn extract_json_object_respects_braces_inside_strings() {
-        let s = r#"= {"a":"}{","b":1} trailing"#;
-        assert_eq!(extract_json_object(s).unwrap(), r#"{"a":"}{","b":1}"#);
-    }
-
-    #[test]
-    fn script_scan_gives_up_instead_of_looping_forever() {
-        let junk = "{".repeat(5000);
-        assert!(scan_script_for_translation(&junk).is_none());
+    fn a_reply_without_translations_is_an_error_not_an_empty_success() {
+        assert!(parse_api(r#"{"code":200,"text":[]}"#).is_err());
+        assert!(parse_api(r#"{"code":200}"#).is_err());
+        assert!(parse_api("<html>captcha</html>").is_err());
     }
 }

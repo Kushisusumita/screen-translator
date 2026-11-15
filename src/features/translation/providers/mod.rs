@@ -22,6 +22,9 @@ use crate::shared::logging::redact;
 
 #[derive(Debug, Clone)]
 pub struct TranslateRequest {
+    /// One paragraph per line. Every engine is expected to answer with the
+    /// same number of lines in the same order: that is what lets each
+    /// translated paragraph be put back where its original was.
     pub text: String,
     /// May be `Auto`; each provider maps that to its own convention.
     pub source: Language,
@@ -57,9 +60,21 @@ pub async fn translate(
     let mut failures: Vec<String> = Vec::new();
     let mut user_reasons: Vec<String> = Vec::new();
 
-    for kind in active {
+    let last = active.len() - 1;
+    for (position, kind) in active.into_iter().enumerate() {
         let started = Instant::now();
-        let outcome = attempt(kind, req, engines).await;
+        // With another engine to turn to, a stalled one is given up on early;
+        // the last in line gets all the time the connection allows.
+        let outcome = match patience(kind).filter(|_| position < last) {
+            Some(limit) => tokio::time::timeout(limit, attempt(kind, req, engines))
+                .await
+                .unwrap_or_else(|_| {
+                    Err(AppError::Other(
+                        t("The service did not answer in time").to_string(),
+                    ))
+                }),
+            None => attempt(kind, req, engines).await,
+        };
         let elapsed = started.elapsed();
 
         match outcome {
@@ -102,6 +117,21 @@ pub async fn translate(
     Err(AppError::Other(
         t("Translation failed.\n\n{reasons}").replace("{reasons}", &user_reasons.join("\n")),
     ))
+}
+
+/// How long an engine is waited for while there is another to fall back on.
+///
+/// The free endpoints answer in a fraction of a second or, when something is
+/// wrong, not at all — and "not at all" used to cost the full twenty seconds
+/// of the connection's own timeout before the next engine was even asked.
+/// Someone standing in front of a dialogue box has moved on by then. A model
+/// may honestly take its time, and has a timeout of its own in the settings.
+fn patience(kind: EngineKind) -> Option<Duration> {
+    match kind {
+        EngineKind::Yandex | EngineKind::Google => Some(Duration::from_secs(7)),
+        EngineKind::DeepL => Some(Duration::from_secs(10)),
+        EngineKind::Ai => None,
+    }
 }
 
 async fn attempt(
@@ -227,6 +257,91 @@ fn collapse_spaces(s: &str) -> String {
         prev_space = is_space;
     }
     out
+}
+
+/// A text broken into pieces that each fit one request, with enough kept to put
+/// the translated pieces back together line for line.
+///
+/// Engines that take a list of texts get one entry per paragraph, which is the
+/// only reliable way to have exactly as many paragraphs come back as went in.
+/// A paragraph too long for one request is cut on sentence boundaries, and its
+/// pieces are joined again afterwards — so the caller sees one line in, one
+/// line out, however the text had to travel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinePlan {
+    /// Every piece, in order.
+    pub pieces: Vec<String>,
+    /// For each piece, the index of the line it belongs to.
+    owner: Vec<usize>,
+    lines: usize,
+}
+
+impl LinePlan {
+    pub fn new(text: &str, max_chars: usize) -> Self {
+        let mut pieces = Vec::new();
+        let mut owner = Vec::new();
+        let mut lines = 0;
+
+        for (index, line) in text.split('\n').enumerate() {
+            lines = index + 1;
+            if line.trim().is_empty() {
+                // Kept as a line so the count survives, but not sent: an
+                // empty string is an error to some engines.
+                continue;
+            }
+            for piece in chunk_text(line, max_chars) {
+                pieces.push(piece);
+                owner.push(index);
+            }
+        }
+
+        Self {
+            pieces,
+            owner,
+            lines,
+        }
+    }
+
+    /// Ranges of `pieces` that may share a request: at most `max_chars` of
+    /// text and `max_items` entries each.
+    pub fn batches(&self, max_chars: usize, max_items: usize) -> Vec<std::ops::Range<usize>> {
+        let mut out = Vec::new();
+        let mut start = 0;
+        let mut size = 0;
+
+        for (i, piece) in self.pieces.iter().enumerate() {
+            let len = piece.chars().count();
+            let full = i > start && (size + len > max_chars || i - start >= max_items.max(1));
+            if full {
+                out.push(start..i);
+                start = i;
+                size = 0;
+            }
+            size += len;
+        }
+        if start < self.pieces.len() {
+            out.push(start..self.pieces.len());
+        }
+        out
+    }
+
+    /// Puts translated pieces back into lines. `translated` must line up with
+    /// `pieces`; anything short of that is the caller's error to report.
+    pub fn assemble(&self, translated: &[String]) -> Option<String> {
+        if translated.len() != self.pieces.len() {
+            return None;
+        }
+        let mut lines = vec![String::new(); self.lines];
+        for (piece, &line) in translated.iter().zip(&self.owner) {
+            let piece = piece.trim();
+            let slot = &mut lines[line];
+            if !slot.is_empty() && !piece.is_empty() {
+                slot.push(' ');
+            }
+            slot.push_str(piece);
+        }
+        Some(lines.join("\n"))
+    }
 }
 
 /// Splits long text on sentence boundaries so each piece fits one API call.
@@ -372,6 +487,69 @@ mod tests {
         let chunks = chunk_text(&text, 100);
         assert_eq!(chunks.concat(), text);
         assert_eq!(chunks.len(), 3);
+    }
+
+    #[test]
+    fn a_plan_sends_one_piece_per_line_and_gets_one_line_back() {
+        let plan = LinePlan::new("Title\nA sentence. Another one.\nButton", 100);
+        assert_eq!(plan.pieces, vec!["Title", "A sentence. Another one.", "Button"]);
+
+        let back = plan
+            .assemble(&["Заголовок".into(), "Фраза. Ещё одна.".into(), "Кнопка".into()])
+            .expect("same number of pieces");
+        assert_eq!(back, "Заголовок\nФраза. Ещё одна.\nКнопка");
+    }
+
+    #[test]
+    fn a_line_too_long_for_one_request_is_split_and_then_rejoined() {
+        let long = "One sentence here. ".repeat(10);
+        let text = format!("Short\n{}", long.trim());
+        let plan = LinePlan::new(&text, 60);
+        assert!(plan.pieces.len() > 2, "the long line was not split");
+
+        let echoed: Vec<String> = plan.pieces.iter().map(|p| p.trim().to_uppercase()).collect();
+        let back = plan.assemble(&echoed).expect("same number of pieces");
+        let lines: Vec<&str> = back.split('\n').collect();
+        assert_eq!(lines.len(), 2, "two lines went in, two must come out");
+        assert_eq!(lines[0], "SHORT");
+        assert_eq!(lines[1], long.trim().to_uppercase());
+    }
+
+    #[test]
+    fn an_empty_line_keeps_its_place_without_being_sent() {
+        let plan = LinePlan::new("first\n\nthird", 100);
+        assert_eq!(plan.pieces, vec!["first", "third"]);
+        let back = plan.assemble(&["1".into(), "3".into()]).unwrap();
+        assert_eq!(back, "1\n\n3");
+    }
+
+    #[test]
+    fn a_reply_with_the_wrong_number_of_pieces_is_refused() {
+        let plan = LinePlan::new("a\nb", 100);
+        assert!(plan.assemble(&["only one".into()]).is_none());
+    }
+
+    #[test]
+    fn batches_respect_both_the_size_and_the_item_limits() {
+        let text = (0..10).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let plan = LinePlan::new(&text, 100);
+
+        // Six characters a line: three lines fit in twenty.
+        let by_size = plan.batches(20, 100);
+        assert!(by_size.iter().all(|r| r.len() <= 3), "{by_size:?}");
+        assert_eq!(by_size.iter().map(|r| r.len()).sum::<usize>(), 10);
+
+        let by_count = plan.batches(10_000, 4);
+        assert_eq!(by_count.len(), 3);
+        assert_eq!(by_count[0], 0..4);
+        assert_eq!(by_count[2], 8..10);
+    }
+
+    #[test]
+    fn a_single_oversized_piece_still_gets_a_batch_of_its_own() {
+        let plan = LinePlan::new("tiny\nthis one is much longer than the limit\ntiny", 100);
+        let batches = plan.batches(10, 100);
+        assert_eq!(batches.len(), 3);
     }
 
     #[test]

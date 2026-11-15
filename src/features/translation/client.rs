@@ -39,15 +39,6 @@ pub fn generate_sid() -> String {
     format!("{a:08x}.{b:08x}.{c:08x}.74722d696d616765")
 }
 
-/// Session ID for the text translation endpoint — "tr-text" in hex.
-pub fn generate_text_sid() -> String {
-    let mut rng = rand::thread_rng();
-    let a: u32 = rng.gen();
-    let b: u32 = rng.gen();
-    let c: u32 = rng.gen();
-    format!("{a:08x}.{b:08x}.{c:08x}.74722d74657874")
-}
-
 /// `yu` — 19-digit Yandex user identifier.
 pub fn generate_yu() -> String {
     let mut rng = rand::thread_rng();
@@ -66,20 +57,28 @@ pub fn generate_yum() -> String {
     format!("{ts}{suffix}")
 }
 
+/// `ucid` — the client id the mobile endpoint keys a session on: 32 hex digits.
+pub fn generate_ucid() -> String {
+    let mut rng = rand::thread_rng();
+    let a: u64 = rng.gen();
+    let b: u64 = rng.gen();
+    format!("{a:016x}{b:016x}")
+}
+
 /// A Yandex session is a `(sid, yu, yum)` triple. Regenerating it on every
 /// request looked like a fresh anonymous user each time, which is exactly the
 /// pattern rate limiters key on. Generating it once per process and reusing it
 /// keeps the cookie jar coherent and measurably reduces refusals.
 pub struct YandexSession {
     pub ocr_sid: String,
-    pub text_sid: String,
+    pub ucid: String,
     pub yu: String,
     pub yum: String,
 }
 
 pub static YANDEX_SESSION: Lazy<YandexSession> = Lazy::new(|| YandexSession {
     ocr_sid: generate_sid(),
-    text_sid: generate_text_sid(),
+    ucid: generate_ucid(),
     yu: generate_yu(),
     yum: generate_yum(),
 });
@@ -91,7 +90,13 @@ mod tests {
     #[test]
     fn sids_carry_the_expected_service_suffix() {
         assert!(generate_sid().ends_with(".74722d696d616765"));
-        assert!(generate_text_sid().ends_with(".74722d74657874"));
+    }
+
+    #[test]
+    fn the_client_id_is_thirty_two_hex_digits() {
+        let ucid = generate_ucid();
+        assert_eq!(ucid.len(), 32);
+        assert!(ucid.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]

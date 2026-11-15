@@ -140,6 +140,37 @@ pub fn close(p: &Painter, rect: Rect, color: Color32) {
     line(p, rect, (0.72, 0.28), (0.28, 0.72), s);
 }
 
+/// An upward arrow — "move this up the queue".
+pub fn arrow_up(p: &Painter, rect: Rect, color: Color32) {
+    let s = stroke_for(rect, color);
+    line(p, rect, (0.5, 0.78), (0.5, 0.24), s);
+    line(p, rect, (0.5, 0.22), (0.26, 0.48), s);
+    line(p, rect, (0.5, 0.22), (0.74, 0.48), s);
+}
+
+/// An eye — "keep watching this area".
+pub fn eye(p: &Painter, rect: Rect, color: Color32) {
+    let s = stroke_for(rect, color);
+    let c = rect.center();
+    let half_w = rect.width() * 0.42;
+    let half_h = rect.height() * 0.24;
+
+    // Two shallow arcs meeting at the corners make the lids.
+    let lid = |sign: f32| -> Vec<Pos2> {
+        (0..=16)
+            .map(|i| {
+                let t = i as f32 / 16.0;
+                let x = -half_w + 2.0 * half_w * t;
+                let y = sign * half_h * (1.0 - (2.0 * t - 1.0).powi(2));
+                c + Vec2::new(x, y)
+            })
+            .collect()
+    };
+    p.add(Shape::line(lid(-1.0), s));
+    p.add(Shape::line(lid(1.0), s));
+    p.circle_filled(c, rect.width() * 0.11, color);
+}
+
 pub fn check(p: &Painter, rect: Rect, color: Color32) {
     let s = Stroke::new((rect.width() * 0.12).clamp(1.2, 2.6), color);
     line(p, rect, (0.22, 0.52), (0.42, 0.72), s);

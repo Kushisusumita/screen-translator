@@ -3,7 +3,7 @@
 use serde_json::{json, Value};
 use tracing::debug;
 
-use super::{chunk_text, TranslateRequest, MAX_CHUNK_CHARS};
+use super::{LinePlan, TranslateRequest, MAX_CHUNK_CHARS};
 use crate::entities::language::Language;
 use crate::features::translation::client::HTTP;
 use crate::shared::error::AppError;
@@ -13,6 +13,8 @@ use crate::shared::secret::Secret;
 
 const FREE: &str = "https://api-free.deepl.com/v2/translate";
 const PRO: &str = "https://api.deepl.com/v2/translate";
+/// DeepL caps a request at fifty texts.
+const MAX_TEXTS_PER_REQUEST: usize = 50;
 
 /// Free-tier keys carry a `:fx` suffix and only work against the free host;
 /// sending them to the pro host returns 403 with no useful explanation.
@@ -80,12 +82,16 @@ pub async fn translate(req: &TranslateRequest, key: &Secret) -> Result<String, A
     })?;
 
     let url = endpoint_for(key.expose());
-    let chunks = chunk_text(&req.text, MAX_CHUNK_CHARS);
+    // One entry per paragraph: DeepL answers a list with a list of the same
+    // length, which is what keeps every translation attached to its original.
+    let plan = LinePlan::new(&req.text, MAX_CHUNK_CHARS);
+    let mismatch =
+        || AppError::Other(t("The service answered with a different number of lines").to_string());
 
-    let mut out = String::with_capacity(req.text.len());
-    for (i, chunk) in chunks.iter().enumerate() {
+    let mut translated: Vec<String> = Vec::with_capacity(plan.pieces.len());
+    for batch in plan.batches(MAX_CHUNK_CHARS, MAX_TEXTS_PER_REQUEST) {
         let mut body = json!({
-            "text": [chunk],
+            "text": &plan.pieces[batch.clone()],
             "target_lang": target,
         });
         if let Some(src) = source_code(req.source) {
@@ -107,28 +113,33 @@ pub async fn translate(req: &TranslateRequest, key: &Secret) -> Result<String, A
             return Err(AppError::Other(explain(status.as_u16(), &raw)));
         }
 
-        let piece = parse(&raw)?;
-        if i > 0 {
-            out.push(' ');
+        let pieces = parse(&raw)?;
+        if pieces.len() != batch.len() {
+            return Err(mismatch());
         }
-        out.push_str(&piece);
+        translated.extend(pieces);
     }
 
-    Ok(out)
+    plan.assemble(&translated).ok_or_else(mismatch)
 }
 
-fn parse(raw: &str) -> Result<String, AppError> {
+fn parse(raw: &str) -> Result<Vec<String>, AppError> {
     let json: Value = serde_json::from_str(raw).map_err(|e| {
         AppError::Other(
             t("Unrecognized response from DeepL: {error}").replace("{error}", &e.to_string()),
         )
     })?;
-    let parts: Vec<&str> = json
+    let parts: Vec<String> = json
         .get("translations")
         .and_then(Value::as_array)
         .map(|a| {
             a.iter()
-                .filter_map(|t| t.get("text").and_then(Value::as_str))
+                .map(|t| {
+                    t.get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string()
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -138,7 +149,7 @@ fn parse(raw: &str) -> Result<String, AppError> {
             t("DeepL returned an empty translation").to_string(),
         ));
     }
-    Ok(parts.join(" "))
+    Ok(parts)
 }
 
 /// DeepL's status codes have specific, actionable meanings — worth spelling out
@@ -188,8 +199,8 @@ mod tests {
 
     #[test]
     fn parses_translations() {
-        let raw = r#"{"translations":[{"detected_source_language":"EN","text":"Привет"}]}"#;
-        assert_eq!(parse(raw).unwrap(), "Привет");
+        let raw = r#"{"translations":[{"detected_source_language":"EN","text":"Привет"},{"text":"мир"}]}"#;
+        assert_eq!(parse(raw).unwrap(), vec!["Привет", "мир"]);
     }
 
     #[test]

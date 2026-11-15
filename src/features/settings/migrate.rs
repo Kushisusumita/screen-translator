@@ -186,6 +186,6 @@ show_translation = true
     fn a_zero_key_is_not_treated_as_a_binding() {
         let s = load("hotkey_modifiers = 2\nhotkey_key = 0\n");
         // Falls back to the default rather than binding "modifier plus nothing".
-        assert_eq!(s.hotkeys.region.key, crate::entities::settings::VK_T);
+        assert_eq!(s.hotkeys.region.key, crate::entities::settings::VK_Q);
     }
 }

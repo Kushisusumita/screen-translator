@@ -63,10 +63,7 @@ impl Default for LogConfig {
 }
 
 pub fn default_log_dir() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("screen-translator")
-        .join("logs")
+    crate::shared::paths::log_dir()
 }
 
 /// Installs the global subscriber. The returned guard flushes the background

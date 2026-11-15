@@ -10,31 +10,15 @@
 //! * a config that failed to parse was replaced by defaults and then
 //!   overwritten, losing whatever was in it. Now it is copied aside first.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use tracing::{error, info, warn};
 
 use crate::entities::settings::{LogSettings, Settings};
 use crate::shared::error::AppError;
 
-pub fn config_dir() -> PathBuf {
-    match dirs::config_dir() {
-        Some(base) => base.join("screen-translator"),
-        None => {
-            // Better than silently scattering config into whatever directory the
-            // app happened to be launched from.
-            warn!("No config directory from the OS; falling back to the executable's folder");
-            std::env::current_exe()
-                .ok()
-                .and_then(|p| p.parent().map(Path::to_path_buf))
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("config")
-        }
-    }
-}
-
 pub fn config_path() -> PathBuf {
-    config_dir().join("config.toml")
+    crate::shared::paths::config_path()
 }
 
 /// Reads just the logging section.
@@ -83,6 +67,15 @@ pub fn load_settings() -> Settings {
                     Ok(()) => info!(backup = %backup.display(), "Kept a copy of the old config"),
                     Err(e) => warn!(error = %e, "Could not back up the old config"),
                 }
+            }
+            // In memory only: the file catches up the next time anything is
+            // saved, and until then this runs again on every start.
+            if let Some(retired) = settings.engines.ai_config.replace_retired_model() {
+                info!(
+                    from = %retired,
+                    to = %settings.engines.ai_config.model,
+                    "The configured AI model is being withdrawn; using its successor"
+                );
             }
             settings
         }
@@ -133,10 +126,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_config_path_sits_under_the_config_dir() {
-        let p = config_path();
-        assert!(p.ends_with("config.toml"));
-        assert!(p.parent().unwrap().ends_with("screen-translator"));
+    fn the_config_file_is_called_config_toml() {
+        assert!(config_path().ends_with("config.toml"));
     }
 
     #[test]

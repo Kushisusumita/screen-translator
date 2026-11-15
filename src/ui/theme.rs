@@ -127,6 +127,30 @@ pub struct Theme {
     pub danger: Color32,
 }
 
+/// A colour at an opacity, premultiplied the way it is going to be blended.
+///
+/// The painter blends on the encoded values: what reaches the screen is
+/// `colour × alpha + what was there × (1 − alpha)`, the same sum a browser or
+/// a design tool does. "White at 8 %" is then what it says — a dark surface
+/// lightened 8 % of the way to white.
+///
+/// `Color32::from_rgba_unmultiplied` multiplies in linear light and encodes
+/// the result. That suits a renderer that blends in linear light and not this
+/// one: white at 8 % arrived as bright as white at 30 %, and every "soft
+/// wash" on a dark surface — a button, a card, a hairline — was a slab of mid
+/// grey. Dark colours never showed it, which is how it went unnoticed.
+pub fn wash(r: u8, g: u8, b: u8, alpha: u8) -> Color32 {
+    fn scaled(value: u8, alpha: u8) -> u8 {
+        ((value as u16 * alpha as u16 + 127) / 255) as u8
+    }
+    Color32::from_rgba_premultiplied(
+        scaled(r, alpha),
+        scaled(g, alpha),
+        scaled(b, alpha),
+        alpha,
+    )
+}
+
 impl Theme {
     pub fn resolve(mode: ThemeMode) -> Self {
         Self::for_platform(Platform::current(), mode.resolve())
@@ -152,12 +176,12 @@ impl Theme {
             chrome: Color32::from_rgb(0xF3, 0xF3, 0xF3),
             card: Color32::WHITE,
             card_accent: Color32::from_rgb(0xFD, 0xF4, 0xF7),
-            glass: Color32::from_rgba_unmultiplied(0xF9, 0xF9, 0xF9, 242),
-            footer: Color32::from_rgba_unmultiplied(0, 0, 0, 6),
-            scrim: Color32::from_rgba_unmultiplied(6, 12, 24, 140),
+            glass: wash(0xF9, 0xF9, 0xF9, 242),
+            footer: wash(0, 0, 0, 6),
+            scrim: wash(6, 12, 24, 140),
 
-            separator: Color32::from_rgba_unmultiplied(0, 0, 0, 16),
-            border: Color32::from_rgba_unmultiplied(0, 0, 0, 14),
+            separator: wash(0, 0, 0, 16),
+            border: wash(0, 0, 0, 14),
 
             text: Color32::from_rgb(0x1B, 0x1B, 0x1B),
             text_dim: Color32::from_rgb(0x6E, 0x6E, 0x70),
@@ -185,13 +209,13 @@ impl Theme {
             chrome: Color32::from_rgb(0x20, 0x20, 0x24),
             card: Color32::from_rgb(0x27, 0x27, 0x2C),
             card_accent: Color32::from_rgb(0x2E, 0x27, 0x2C),
-            glass: Color32::from_rgba_unmultiplied(0x20, 0x20, 0x24, 234),
-            footer: Color32::from_rgba_unmultiplied(255, 255, 255, 8),
-            scrim: Color32::from_rgba_unmultiplied(6, 12, 24, 145),
+            glass: wash(0x20, 0x20, 0x24, 234),
+            footer: wash(255, 255, 255, 8),
+            scrim: wash(6, 12, 24, 145),
 
             // The 0.08 white the brief asks for.
-            separator: Color32::from_rgba_unmultiplied(255, 255, 255, 20),
-            border: Color32::from_rgba_unmultiplied(255, 255, 255, 16),
+            separator: wash(255, 255, 255, 20),
+            border: wash(255, 255, 255, 16),
 
             text: Color32::from_rgb(0xF2, 0xF2, 0xF4),
             text_dim: Color32::from_rgb(0xA6, 0xA6, 0xAE),
@@ -220,12 +244,12 @@ impl Theme {
             chrome: Color32::from_rgb(0xEC, 0xEC, 0xEF),
             card: Color32::WHITE,
             card_accent: Color32::from_rgb(0xFD, 0xF4, 0xF7),
-            glass: Color32::from_rgba_unmultiplied(0xF6, 0xF6, 0xF8, 238),
-            footer: Color32::from_rgba_unmultiplied(0, 0, 0, 5),
-            scrim: Color32::from_rgba_unmultiplied(10, 12, 22, 133),
+            glass: wash(0xF6, 0xF6, 0xF8, 238),
+            footer: wash(0, 0, 0, 5),
+            scrim: wash(10, 12, 22, 133),
 
-            separator: Color32::from_rgba_unmultiplied(0, 0, 0, 14),
-            border: Color32::from_rgba_unmultiplied(0, 0, 0, 12),
+            separator: wash(0, 0, 0, 14),
+            border: wash(0, 0, 0, 12),
 
             text: Color32::from_rgb(0x1A, 0x1A, 0x1A),
             text_dim: Color32::from_rgb(0x6E, 0x6E, 0x72),
@@ -258,12 +282,12 @@ impl Theme {
             chrome: Color32::from_rgb(0x21, 0x23, 0x2A),
             card: Color32::from_rgb(0x24, 0x26, 0x2E),
             card_accent: Color32::from_rgb(0x30, 0x28, 0x2F),
-            glass: Color32::from_rgba_unmultiplied(0x20, 0x22, 0x2A, 232),
-            footer: Color32::from_rgba_unmultiplied(255, 255, 255, 8),
-            scrim: Color32::from_rgba_unmultiplied(6, 7, 12, 145),
+            glass: wash(0x20, 0x22, 0x2A, 232),
+            footer: wash(255, 255, 255, 8),
+            scrim: wash(6, 7, 12, 145),
 
-            separator: Color32::from_rgba_unmultiplied(255, 255, 255, 20),
-            border: Color32::from_rgba_unmultiplied(255, 255, 255, 16),
+            separator: wash(255, 255, 255, 20),
+            border: wash(255, 255, 255, 16),
 
             text: Color32::from_rgb(0xF0, 0xF0, 0xF2),
             text_dim: Color32::from_rgb(0xA6, 0xA8, 0xB0),
@@ -297,48 +321,37 @@ impl Theme {
     }
 
     pub fn border_stroke(&self) -> Stroke {
-        Stroke::new(1.0, self.border)
+        Stroke::new(1.0_f32, self.border)
     }
 
     /// Same hue, dialled down — for hover fills and tinted notices.
     pub fn tint(&self, color: Color32, alpha: u8) -> Color32 {
-        Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha)
-    }
-
-    /// Outline for the inline translation patch. The deeper pink reads as an
-    /// edge on a light page; on a dark one it needs the softer tint to stay
-    /// visible without glowing.
-    pub fn sakura_border(&self) -> Color32 {
-        if self.dark {
-            self.sakura_soft
-        } else {
-            self.sakura
-        }
+        wash(color.r(), color.g(), color.b(), alpha)
     }
 
     /// Resting fill of a frameless control — a dropdown, a button, a key badge.
     /// Enough separation from the surface underneath to read as a target.
     pub fn control_fill(&self) -> Color32 {
         if self.dark {
-            Color32::from_rgba_unmultiplied(255, 255, 255, 26)
+            wash(255, 255, 255, 26)
         } else {
-            Color32::from_rgba_unmultiplied(0, 0, 0, 16)
+            wash(0, 0, 0, 16)
         }
     }
 
     pub fn control_fill_hover(&self) -> Color32 {
         if self.dark {
-            Color32::from_rgba_unmultiplied(255, 255, 255, 42)
+            wash(255, 255, 255, 42)
         } else {
-            Color32::from_rgba_unmultiplied(0, 0, 0, 26)
+            wash(0, 0, 0, 26)
         }
     }
 
     pub fn control_fill_active(&self) -> Color32 {
         if self.dark {
-            Color32::from_rgba_unmultiplied(255, 255, 255, 58)
+            wash(255, 255, 255, 58)
         } else {
-            Color32::from_rgba_unmultiplied(0, 0, 0, 38)
+            wash(0, 0, 0, 38)
         }
     }
 
@@ -358,9 +371,9 @@ impl Theme {
 
     pub fn hover_fill(&self) -> Color32 {
         if self.dark {
-            Color32::from_rgba_unmultiplied(255, 255, 255, 18)
+            wash(255, 255, 255, 18)
         } else {
-            Color32::from_rgba_unmultiplied(0, 0, 0, 12)
+            wash(0, 0, 0, 12)
         }
     }
 
@@ -382,7 +395,7 @@ impl Theme {
         v.menu_rounding = Rounding::same(self.metrics.menu_radius);
         v.window_stroke = self.border_stroke();
         v.selection.bg_fill = self.tint(self.accent, 90);
-        v.selection.stroke = Stroke::new(1.0, self.accent);
+        v.selection.stroke = Stroke::new(1.0_f32, self.accent);
         v.window_shadow = egui::epaint::Shadow {
             offset: egui::vec2(0.0, 12.0),
             blur: 32.0,
@@ -411,15 +424,15 @@ impl Theme {
             w.bg_stroke = Stroke::NONE;
             w.expansion = 0.0;
         }
-        v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, self.text_dim);
+        v.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, self.text_dim);
         v.widgets.inactive.weak_bg_fill = self.control_fill();
-        v.widgets.inactive.fg_stroke = Stroke::new(1.0, self.text);
+        v.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, self.text);
         v.widgets.hovered.weak_bg_fill = self.control_fill_hover();
-        v.widgets.hovered.fg_stroke = Stroke::new(1.0, self.text);
+        v.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, self.text);
         v.widgets.active.weak_bg_fill = self.control_fill_active();
-        v.widgets.active.fg_stroke = Stroke::new(1.0, self.text);
+        v.widgets.active.fg_stroke = Stroke::new(1.0_f32, self.text);
         v.widgets.open.weak_bg_fill = self.control_fill_active();
-        v.widgets.open.fg_stroke = Stroke::new(1.0, self.text);
+        v.widgets.open.fg_stroke = Stroke::new(1.0_f32, self.text);
 
         ctx.set_visuals(v);
 
@@ -494,13 +507,17 @@ pub fn build_fonts() -> FontDefinitions {
     fonts
 }
 
+/// A font file as egui wants it — borrowed, so that it is in memory once and
+/// stays that way however often the stack is rebuilt. See
+/// [`crate::shared::file_bytes`] for what handing egui an owned copy costs.
+fn font_data(path: &str) -> Option<FontData> {
+    crate::shared::file_bytes::forever(path).map(FontData::from_static)
+}
+
 fn load_first(paths: &[&str]) -> Option<(String, FontData)> {
-    for path in paths {
-        if let Ok(bytes) = std::fs::read(path) {
-            return Some(((*path).to_string(), FontData::from_owned(bytes)));
-        }
-    }
-    None
+    paths
+        .iter()
+        .find_map(|path| font_data(path).map(|data| ((*path).to_string(), data)))
 }
 
 /// Every candidate that exists on this machine, in the order given.
@@ -510,8 +527,7 @@ fn load_first(paths: &[&str]) -> Option<(String, FontData)> {
 fn load_all_weighted(paths: &[(&str, f32)]) -> Vec<(String, FontData)> {
     let mut loaded = Vec::new();
     for (path, y_offset) in paths {
-        if let Ok(bytes) = std::fs::read(path) {
-            let mut fd = FontData::from_owned(bytes);
+        if let Some(mut fd) = font_data(path) {
             fd.tweak.y_offset_factor = *y_offset;
             loaded.push(((*path).to_string(), fd));
         }

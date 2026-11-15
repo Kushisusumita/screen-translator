@@ -22,6 +22,8 @@ use crate::entities::settings::{CaptureMode, Hotkeys};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrayEvent {
     Capture(CaptureMode),
+    /// Pick a region and keep translating it.
+    Watch,
     ShowSettings,
     Exit,
 }
@@ -142,7 +144,7 @@ mod portable {
     use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
     use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
-    use crate::entities::settings::Hotkey;
+    use crate::entities::settings::{Hotkey, HotkeyAction};
     use crate::shared::i18n::t;
     use crate::ui::spin::Spin;
 
@@ -189,6 +191,7 @@ mod portable {
         region: MenuItem,
         window: MenuItem,
         fullscreen: MenuItem,
+        watch: MenuItem,
         /// The menu itself is kept alive by the tray icon; these are only for
         /// matching an event back to what the user clicked.
         _menu: Menu,
@@ -209,6 +212,9 @@ mod portable {
                 CaptureMode::FullScreen.label_menu(),
                 &hotkeys.fullscreen,
             ));
+            items
+                .watch
+                .set_text(label(HotkeyAction::Watch.label(), &hotkeys.watch));
         }
 
         /// Records the state. The frames themselves come from [`tick`], because
@@ -318,6 +324,7 @@ mod portable {
             true,
             None,
         );
+        let watch = MenuItem::new(label(HotkeyAction::Watch.label(), &hotkeys.watch), true, None);
         let settings = MenuItem::new(t("Settings"), true, None);
         let exit = MenuItem::new(t("Quit"), true, None);
 
@@ -327,6 +334,7 @@ mod portable {
                 &region,
                 &window,
                 &fullscreen,
+                &watch,
                 &PredefinedMenuItem::separator(),
                 &settings,
                 &exit,
@@ -341,6 +349,7 @@ mod portable {
             region: region.id().clone(),
             window: window.id().clone(),
             fullscreen: fullscreen.id().clone(),
+            watch: watch.id().clone(),
             settings: settings.id().clone(),
             exit: exit.id().clone(),
         };
@@ -377,6 +386,7 @@ mod portable {
                 region,
                 window,
                 fullscreen,
+                watch,
                 _menu: menu,
             }),
             spin: RefCell::new(Spin::new()),
@@ -406,6 +416,7 @@ mod portable {
         region: MenuId,
         window: MenuId,
         fullscreen: MenuId,
+        watch: MenuId,
         settings: MenuId,
         exit: MenuId,
     }
@@ -418,6 +429,8 @@ mod portable {
                 Some(TrayEvent::Capture(CaptureMode::Window))
             } else if id == &self.fullscreen {
                 Some(TrayEvent::Capture(CaptureMode::FullScreen))
+            } else if id == &self.watch {
+                Some(TrayEvent::Watch)
             } else if id == &self.settings {
                 Some(TrayEvent::ShowSettings)
             } else if id == &self.exit {
@@ -493,6 +506,7 @@ mod win {
     const ID_REGION: usize = 101;
     const ID_WINDOW: usize = 102;
     const ID_FULLSCREEN: usize = 103;
+    const ID_WATCH: usize = 104;
     const ID_SETTINGS: usize = 110;
     const ID_EXIT: usize = 111;
 
@@ -885,6 +899,10 @@ mod win {
         let region = item(CaptureMode::Region.label_menu(), &hotkeys.region);
         let window = item(CaptureMode::Window.label_menu(), &hotkeys.window);
         let full = item(CaptureMode::FullScreen.label_menu(), &hotkeys.fullscreen);
+        let watch = item(
+            crate::entities::settings::HotkeyAction::Watch.label(),
+            &hotkeys.watch,
+        );
         let settings: Vec<u16> = t("Settings")
             .encode_utf16()
             .chain(std::iter::once(0))
@@ -897,6 +915,7 @@ mod win {
         let _ = AppendMenuW(menu, MF_STRING, ID_REGION, PCWSTR(region.as_ptr()));
         let _ = AppendMenuW(menu, MF_STRING, ID_WINDOW, PCWSTR(window.as_ptr()));
         let _ = AppendMenuW(menu, MF_STRING, ID_FULLSCREEN, PCWSTR(full.as_ptr()));
+        let _ = AppendMenuW(menu, MF_STRING, ID_WATCH, PCWSTR(watch.as_ptr()));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, ID_SETTINGS, PCWSTR(settings.as_ptr()));
         let _ = AppendMenuW(menu, MF_STRING, ID_EXIT, PCWSTR(exit.as_ptr()));
@@ -924,6 +943,7 @@ mod win {
             ID_REGION => send(TrayEvent::Capture(CaptureMode::Region)),
             ID_WINDOW => send(TrayEvent::Capture(CaptureMode::Window)),
             ID_FULLSCREEN => send(TrayEvent::Capture(CaptureMode::FullScreen)),
+            ID_WATCH => send(TrayEvent::Watch),
             ID_SETTINGS => send(TrayEvent::ShowSettings),
             ID_EXIT => send(TrayEvent::Exit),
             _ => {}

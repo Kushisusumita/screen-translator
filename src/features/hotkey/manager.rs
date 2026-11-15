@@ -1,7 +1,7 @@
 //! Global hotkeys.
 //!
-//! Four bindings now instead of one, so the tray menu's Область / Окно / Весь
-//! экран entries each have a shortcut. Two behavioural fixes over the original:
+//! One binding per action, so every entry of the tray menu has a shortcut. Two
+//! behavioural fixes over the original:
 //!
 //! * events go through a channel rather than a shared `Option`, which used to
 //!   drop a press if two arrived between UI frames;
@@ -9,6 +9,13 @@
 //!   Previously, binding a combination already owned by another application
 //!   unregistered the working hotkey and then failed, leaving the user with no
 //!   way to invoke the app at all.
+//!
+//! Besides the bindings the user sets there is one the app holds only while a
+//! translation is on screen: **Esc**. The floating views never take the
+//! keyboard focus — that is the point of them — so a key pressed "at" one goes
+//! to the game underneath. Registering Esc for exactly as long as there is
+//! something to dismiss gives the key the meaning it has everywhere else, and
+//! hands it back the moment the translation is gone.
 
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -25,6 +32,9 @@ pub type Accepted = Arc<Mutex<Vec<(HotkeyAction, bool)>>>;
 pub struct HotkeyManager {
     events: Receiver<HotkeyAction>,
     accepted: Accepted,
+    /// Whether Esc is currently held as a shortcut, so the request is only
+    /// passed on when it changes.
+    dismissing: std::cell::Cell<bool>,
     #[cfg(windows)]
     control: win::Control,
     #[cfg(not(windows))]
@@ -43,6 +53,7 @@ impl HotkeyManager {
             HotkeyManager {
                 events: rx,
                 accepted,
+                dismissing: std::cell::Cell::new(false),
                 control,
                 _thread: Some(handle),
             }
@@ -53,6 +64,7 @@ impl HotkeyManager {
             HotkeyManager {
                 events: rx,
                 accepted,
+                dismissing: std::cell::Cell::new(false),
                 control,
                 _thread: handle,
             }
@@ -66,6 +78,14 @@ impl HotkeyManager {
 
     pub fn update(&self, hotkeys: Hotkeys) {
         self.control.update(hotkeys);
+    }
+
+    /// Holds Esc as a shortcut for "hide the translation" while `on`, and
+    /// releases it otherwise. Cheap to call every frame.
+    pub fn set_dismiss(&self, on: bool) {
+        if self.dismissing.replace(on) != on {
+            self.control.set_dismiss(on);
+        }
     }
 
     pub fn rejected(&self) -> Vec<HotkeyAction> {
@@ -120,9 +140,39 @@ mod portable {
         live: Mutex<Vec<HotKey>>,
         bindings: Bindings,
         accepted: Accepted,
+        /// Esc, while it is held for dismissing a translation.
+        dismiss: Mutex<Option<HotKey>>,
     }
 
     impl Control {
+        pub fn set_dismiss(&self, on: bool) {
+            let Some(manager) = self.manager.as_ref() else {
+                return;
+            };
+            let mut held = self.dismiss.lock().unwrap_or_else(|e| e.into_inner());
+            let mut bindings = self.bindings.lock().unwrap_or_else(|e| e.into_inner());
+
+            if on && held.is_none() {
+                let escape = HotKey::new(None, Code::Escape);
+                match manager.register(escape) {
+                    Ok(()) => {
+                        bindings.insert(escape.id(), HotkeyAction::Hide);
+                        *held = Some(escape);
+                    }
+                    // Another program holds Esc. The translation can still be
+                    // clicked away, so this is not worth a warning on screen.
+                    Err(e) => warn!(error = %e, "Could not take Esc for dismissing"),
+                }
+            } else if !on {
+                if let Some(escape) = held.take() {
+                    bindings.remove(&escape.id());
+                    if let Err(e) = manager.unregister(escape) {
+                        warn!(error = %e, "Could not release Esc");
+                    }
+                }
+            }
+        }
+
         pub fn update(&self, hotkeys: Hotkeys) {
             let Some(manager) = self.manager.as_ref() else {
                 return;
@@ -138,8 +188,15 @@ mod portable {
                 }
             }
 
+            // Everything the user bound goes; Esc, if it is being held, stays.
+            let escape = self
+                .dismiss
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .map(|hotkey| hotkey.id());
             let mut bindings = self.bindings.lock().unwrap_or_else(|e| e.into_inner());
-            bindings.clear();
+            bindings.retain(|id, _| Some(*id) == escape);
 
             let mut accepted = self.accepted.lock().unwrap_or_else(|e| e.into_inner());
             accepted.clear();
@@ -179,6 +236,14 @@ mod portable {
             for hotkey in live.drain(..) {
                 let _ = manager.unregister(hotkey);
             }
+            if let Some(escape) = self
+                .dismiss
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+            {
+                let _ = manager.unregister(escape);
+            }
         }
     }
 
@@ -202,6 +267,7 @@ mod portable {
             live: Mutex::new(Vec::new()),
             bindings: Arc::clone(&bindings),
             accepted,
+            dismiss: Mutex::new(None),
         };
         control.update(hotkeys);
 
@@ -257,7 +323,9 @@ mod portable {
             modifiers |= Modifiers::SUPER;
         }
 
-        Some(HotKey::new(Some(modifiers), vk_to_code(binding.key)?))
+        // A function key bound on its own carries no modifier at all.
+        let modifiers = (!modifiers.is_empty()).then_some(modifiers);
+        Some(HotKey::new(modifiers, vk_to_code(binding.key)?))
     }
 
     fn vk_to_code(vk: u32) -> Option<Code> {
@@ -270,6 +338,13 @@ mod portable {
             0x70..=0x7B => return format!("F{}", vk - 0x70 + 1).parse().ok(),
             0x20 => "Space",
             0x0D => "Enter",
+            0x1B => "Escape",
+            0x21 => "PageUp",
+            0x22 => "PageDown",
+            0x23 => "End",
+            0x24 => "Home",
+            0x2D => "Insert",
+            0x2E => "Delete",
             0xC0 => "Backquote",
             0xBD => "Minus",
             0xBB => "Equal",
@@ -288,7 +363,7 @@ mod portable {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::entities::settings::{VK_S, VK_T};
+        use crate::entities::settings::{bindable_alone, VK_Q, VK_W};
 
         #[test]
         fn the_default_bindings_all_map_to_a_portable_code() {
@@ -301,8 +376,8 @@ mod portable {
 
         #[test]
         fn letters_digits_and_function_keys_all_translate() {
-            assert_eq!(vk_to_code(VK_T), Some(Code::KeyT));
-            assert_eq!(vk_to_code(VK_S), Some(Code::KeyS));
+            assert_eq!(vk_to_code(VK_Q), Some(Code::KeyQ));
+            assert_eq!(vk_to_code(VK_W), Some(Code::KeyW));
             assert_eq!(vk_to_code(0x31), Some(Code::Digit1));
             assert_eq!(vk_to_code(0x70), Some(Code::F1));
             assert_eq!(vk_to_code(0x7B), Some(Code::F12));
@@ -317,9 +392,24 @@ mod portable {
 
         #[test]
         fn the_windows_key_becomes_the_command_key() {
-            let binding = Hotkey::new(MOD_WIN, VK_T);
+            let binding = Hotkey::new(MOD_WIN, VK_Q);
             let hotkey = to_hotkey(binding).expect("mappable");
             assert!(hotkey.mods.contains(Modifiers::SUPER));
+        }
+
+        #[test]
+        fn every_key_that_may_be_bound_alone_has_a_portable_code() {
+            for vk in 0..=0xFF {
+                if bindable_alone(vk) {
+                    assert!(vk_to_code(vk).is_some(), "key {vk:#x} has no portable code");
+                }
+            }
+        }
+
+        #[test]
+        fn a_key_bound_alone_registers_without_modifiers() {
+            let hotkey = to_hotkey(Hotkey::new(0, 0x77)).expect("F8 is mappable");
+            assert!(hotkey.mods.is_empty());
         }
     }
 }
@@ -328,6 +418,7 @@ mod portable {
 mod win {
     use super::*;
 
+    use crate::entities::settings::{MOD_NOREPEAT, VK_ESCAPE};
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -341,8 +432,12 @@ mod win {
     };
 
     const WM_UPDATE_HOTKEYS: u32 = WM_APP + 1;
+    /// `wparam` says whether Esc should be held (1) or released (0).
+    const WM_SET_DISMISS: u32 = WM_APP + 2;
     /// Scratch id used to test-drive a binding before committing to it.
     const PROBE_ID: i32 = 900;
+    /// Esc, while a translation is on screen.
+    const DISMISS_ID: i32 = 60;
 
     pub struct Control {
         hwnd: Arc<Mutex<Option<usize>>>,
@@ -355,15 +450,23 @@ mod win {
             self.post(WM_UPDATE_HOTKEYS);
         }
 
+        pub fn set_dismiss(&self, on: bool) {
+            self.post_with(WM_SET_DISMISS, WPARAM(usize::from(on)));
+        }
+
         pub fn shutdown(&self) {
             self.post(WM_CLOSE);
         }
 
         fn post(&self, msg: u32) {
+            self.post_with(msg, WPARAM(0));
+        }
+
+        fn post_with(&self, msg: u32, wparam: WPARAM) {
             let guard = self.hwnd.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(raw) = *guard {
                 unsafe {
-                    let _ = PostMessageW(HWND(raw as *mut _), msg, WPARAM(0), LPARAM(0));
+                    let _ = PostMessageW(HWND(raw as *mut _), msg, wparam, LPARAM(0));
                 }
             }
         }
@@ -454,12 +557,7 @@ mod win {
                     ctx,
                     pending,
                     accepted: Arc::clone(&accepted),
-                    current: Hotkeys {
-                        region: crate::entities::settings::Hotkey::unbound(),
-                        window: crate::entities::settings::Hotkey::unbound(),
-                        fullscreen: crate::entities::settings::Hotkey::unbound(),
-                        repeat: crate::entities::settings::Hotkey::unbound(),
-                    },
+                    current: Hotkeys::none(),
                 });
             });
 
@@ -490,6 +588,8 @@ mod win {
             HotkeyAction::Window => 2,
             HotkeyAction::FullScreen => 3,
             HotkeyAction::Repeat => 4,
+            HotkeyAction::Watch => 5,
+            HotkeyAction::Hide => 6,
         }
     }
 
@@ -501,6 +601,7 @@ mod win {
         for action in HotkeyAction::all() {
             let _ = UnregisterHotKey(hwnd, slot_id(action));
         }
+        let _ = UnregisterHotKey(hwnd, DISMISS_ID);
     }
 
     /// Applies a new binding set, keeping any previous binding whose replacement
@@ -534,6 +635,9 @@ mod win {
 
                 // Probe first: if this combination belongs to another app, the
                 // probe fails and the working binding is left untouched.
+                // A combination this app already holds for another action is
+                // refused here too, which is right: only one of the two could
+                // ever fire, and the settings window says so.
                 let probe =
                     RegisterHotKey(hwnd, PROBE_ID, HOT_KEY_MODIFIERS(want.modifiers), want.key);
                 if probe.is_err() {
@@ -583,7 +687,13 @@ mod win {
     ) -> LRESULT {
         match msg {
             WM_HOTKEY => {
-                if let Some(action) = action_for(wparam.0 as i32) {
+                let id = wparam.0 as i32;
+                let action = if id == DISMISS_ID {
+                    Some(HotkeyAction::Hide)
+                } else {
+                    action_for(id)
+                };
+                if let Some(action) = action {
                     STATE.with(|cell| {
                         if let Some(state) = cell.borrow().as_ref() {
                             info!(action = ?action, "Hotkey fired");
@@ -592,6 +702,24 @@ mod win {
                             state.ctx.request_repaint();
                         }
                     });
+                }
+                LRESULT(0)
+            }
+            WM_SET_DISMISS => {
+                if wparam.0 != 0 {
+                    // No modifiers beyond "do not auto-repeat". If another
+                    // program holds Esc this fails, and the translation can
+                    // still be clicked away.
+                    if let Err(e) = RegisterHotKey(
+                        hwnd,
+                        DISMISS_ID,
+                        HOT_KEY_MODIFIERS(MOD_NOREPEAT),
+                        VK_ESCAPE,
+                    ) {
+                        warn!(error = ?e, "Could not take Esc for dismissing");
+                    }
+                } else {
+                    let _ = UnregisterHotKey(hwnd, DISMISS_ID);
                 }
                 LRESULT(0)
             }

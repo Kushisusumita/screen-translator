@@ -11,7 +11,8 @@ mod ui;
 use eframe::NativeOptions;
 use egui::ViewportBuilder;
 
-use app::App;
+use app::{App, Startup};
+use features::capture::Bounds;
 use features::settings::ui::Section;
 use shared::i18n::t;
 use shared::logging::{self, LogConfig};
@@ -22,11 +23,14 @@ struct Args {
     /// Handy for a desktop shortcut, and for looking at the UI without
     /// triggering a screen capture.
     open_settings: Option<Section>,
+    /// Something to do as soon as the app is up.
+    startup: Option<Startup>,
 }
 
 fn parse_args() -> Args {
     let mut args = Args {
         open_settings: None,
+        startup: None,
     };
     let mut it = std::env::args().skip(1).peekable();
     while let Some(arg) = it.next() {
@@ -40,6 +44,13 @@ fn parse_args() -> Args {
                     });
                 args.open_settings = Some(section.unwrap_or(Section::General));
             }
+            "--region" | "-r" => match it.next().as_deref().and_then(parse_area) {
+                Some(area) => args.startup = Some(Startup::Area(area)),
+                None => eprintln!(
+                    "{}",
+                    t("--region takes four numbers: left,top,width,height")
+                ),
+            },
             "--help" | "-h" => {
                 println!("Sakura Screen Translator {}", env!("CARGO_PKG_VERSION"));
                 println!();
@@ -49,7 +60,11 @@ fn parse_args() -> Args {
                     "  --settings, -s [page]     {}",
                     t("open settings on a given page")
                 );
-                println!("                            (general, keys, languages, engine, appearance, logs, about)");
+                println!("                            (general, keys, languages, engine, appearance, history, logs, about)");
+                println!(
+                    "  --region, -r x,y,w,h      {}",
+                    t("translate this rectangle of the screen right away")
+                );
                 println!("  --help, -h                {}", t("show this help"));
                 std::process::exit(0);
             }
@@ -60,6 +75,20 @@ fn parse_args() -> Args {
         }
     }
     args
+}
+
+/// `left,top,width,height` in desktop pixels. The left and top may be
+/// negative — a monitor to the left of the primary one starts below zero.
+fn parse_area(text: &str) -> Option<Bounds> {
+    let numbers: Vec<i32> = text
+        .split(',')
+        .map(|part| part.trim().parse::<i32>())
+        .collect::<Result<_, _>>()
+        .ok()?;
+    match numbers[..] {
+        [x, y, w, h] if w > 0 && h > 0 => Some(Bounds { x, y, w, h }),
+        _ => None,
+    }
 }
 
 fn main() -> eframe::Result<()> {
@@ -97,6 +126,7 @@ fn main() -> eframe::Result<()> {
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
         settings_page = ?args.open_settings,
+        startup = ?args.startup,
         "Sakura Screen Translator starting"
     );
 
@@ -121,6 +151,16 @@ fn main() -> eframe::Result<()> {
             .with_decorations(false)
             .with_resizable(false)
             .with_taskbar(false)
+            // A placeholder has no use for the keyboard, and an app that
+            // starts with the session should not take it from whatever the
+            // user was typing into.
+            .with_active(false)
+            // The GL configuration is chosen once, for this window, and every
+            // other window shares it. Where the toolkit handles transparency,
+            // asking for it here is what gives the floating views a surface
+            // they can be see-through on; without it they come up as opaque
+            // rectangles. Windows goes about it another way.
+            .with_transparent(features::capture::native::TOOLKIT_TRANSPARENCY)
             .with_visible(true),
         ..Default::default()
     };
@@ -128,7 +168,14 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Sakura Screen Translator",
         options,
-        Box::new(move |cc| Ok(Box::new(App::new(cc, settings, args.open_settings)))),
+        Box::new(move |cc| {
+            Ok(Box::new(App::new(
+                cc,
+                settings,
+                args.open_settings,
+                args.startup,
+            )))
+        }),
     )
 }
 
@@ -182,6 +229,48 @@ impl Drop for SingleInstance {
         unsafe {
             use windows::Win32::Foundation::CloseHandle;
             let _ = CloseHandle(self.handle);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_area_is_four_comma_separated_numbers() {
+        assert_eq!(
+            parse_area("100,200,640,120"),
+            Some(Bounds {
+                x: 100,
+                y: 200,
+                w: 640,
+                h: 120
+            })
+        );
+        assert_eq!(
+            parse_area(" 10 , 20 , 30 , 40 "),
+            Some(Bounds {
+                x: 10,
+                y: 20,
+                w: 30,
+                h: 40
+            })
+        );
+    }
+
+    #[test]
+    fn an_area_on_a_monitor_left_of_the_primary_starts_below_zero() {
+        assert_eq!(
+            parse_area("-1920,0,800,600").map(|b| b.x),
+            Some(-1920)
+        );
+    }
+
+    #[test]
+    fn a_malformed_area_is_refused_rather_than_guessed() {
+        for bad in ["", "1,2,3", "1,2,3,4,5", "a,b,c,d", "0,0,0,10", "0,0,10,-5"] {
+            assert_eq!(parse_area(bad), None, "{bad:?} was accepted");
         }
     }
 }

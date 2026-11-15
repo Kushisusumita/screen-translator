@@ -1,63 +1,66 @@
 //! Application orchestrator.
 //!
-//! Owns the settings, drives the capture → translate → present flow, and hosts
-//! the overlay, the result view and the settings window as egui viewports.
+//! Owns the settings and the two background helpers (hotkeys, tray), and hosts
+//! every window as an egui viewport. The work itself lives next door:
+//!
+//! * [`session`] — one capture, from the shortcut to the translation on screen;
+//! * [`result`] — how that translation is shown;
+//! * [`updates`] — finding and installing a newer release.
 //!
 //! Settings live here as a plain value rather than behind an `Arc<Mutex<_>>`.
 //! Only the UI thread touches them; background work gets an immutable snapshot
 //! at spawn time. That removes the whole class of "lock poisoned, app silently
 //! stops working" failures the previous structure was prone to.
 
+#[cfg(debug_assertions)]
+mod automation;
 pub mod result;
+mod session;
+mod updates;
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use egui::{ColorImage, Context, ViewportBuilder, ViewportCommand, ViewportId};
+use egui::{Context, ViewportBuilder, ViewportCommand, ViewportId};
 use tracing::{error, info, warn};
 
-use crate::entities::history::{History, HistoryEntry};
-use crate::entities::settings::{CaptureMode, HotkeyAction, ResultView, Settings};
-use crate::features::capture::{
-    capture_desktop_image, capture_region_for_ocr, foreground_window_bounds, virtual_desktop,
-    window_pick, Bounds, Geometry, OverlayState,
-};
+use crate::entities::history::History;
+use crate::entities::settings::{CaptureMode, EngineKind, HotkeyAction, ResultView, Settings};
+use crate::features::capture::overlay::Purpose;
+use crate::features::capture::{cursor_position, monitor_for, native, Bounds, OverlayState};
 use crate::features::hotkey::HotkeyManager;
 use crate::features::settings::save_settings;
-use crate::features::settings::ui::{Section, SettingsContext, SettingsUi};
-use crate::features::translation::{run_pipeline, PipelineParams, PipelineResult};
+use crate::features::settings::ui::{Section, SettingsContext, SettingsOutput, SettingsUi};
+use crate::features::translation::PipelineResult;
 use crate::features::tray::{TrayEvent, TrayManager};
-use crate::features::updater::{check_for_update, download_and_apply, UpdateInfo};
 use crate::shared::i18n::t;
 use crate::shared::logging;
 use crate::shared::utils::autostart::{get_current_exe_path, set_autostart};
 use crate::shared::utils::clipboard::copy_text_to_clipboard;
-use crate::shared::utils::notify;
 use crate::shared::utils::tts;
-use crate::ui::{theme::Theme, widgets};
+use crate::ui::theme::Theme;
 
 use result::{ResultAction, ResultUi, Stage};
+use session::{Job, JobEvent, LastCapture, Pending, Watch};
+use updates::{SharedUpdate, UpdateState};
 
-/// Monotonic id for capture requests. A result whose id is not the current one
-/// belongs to a capture the user has already replaced, and is dropped.
-static GENERATION: AtomicU64 = AtomicU64::new(0);
-
-#[derive(Debug, Clone)]
-enum UpdateState {
-    Checking,
-    UpToDate,
-    Available(UpdateInfo),
-    Downloading { received: u64, total: u64 },
-    /// Installed and waiting to be restarted. The restart happens on the UI
-    /// thread so the settings are saved and the tray icon removed first.
-    Installed(std::path::PathBuf),
-    Error(String),
+/// Whether the app has been asked not to bring its windows to the front.
+///
+/// Set by `SAKURA_NO_FOCUS`, for checking the app on a machine someone is
+/// using: its windows still open, but none of them takes the keyboard from
+/// whatever that person is doing.
+pub(crate) fn stays_in_background() -> bool {
+    static ASKED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ASKED.get_or_init(|| std::env::var_os("SAKURA_NO_FOCUS").is_some())
 }
 
-/// The error side carries the message and whether it is a failure at all:
-/// "no text in this rectangle" is an outcome, not a fault.
-type PipelineSlot = Arc<Mutex<Option<(u64, Result<PipelineResult, (String, bool)>)>>>;
+/// Something the command line asked to happen as soon as the app is up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Startup {
+    /// Translate this rectangle of the screen, in desktop pixels.
+    Area(Bounds),
+}
 
 pub struct App {
     settings: Settings,
@@ -68,27 +71,44 @@ pub struct App {
     hotkeys: HotkeyManager,
     tray: TrayManager,
 
+    // ── The capture in progress ──────────────────────────────────────────────
+    /// The selection overlay, while the user is choosing what to translate.
     overlay: Option<OverlayState>,
+    /// The translation on screen, from "working…" to the answer.
     result: Option<ResultUi>,
-    /// Frozen desktop, shared by the overlay and the inline result view.
-    desktop_image: Option<ColorImage>,
-    last_capture: Option<(Bounds, Geometry)>,
+    /// The translation in flight, if any.
+    job: Option<Job>,
+    job_events: (Sender<JobEvent>, Receiver<JobEvent>),
+    /// A capture waiting for the app's own windows to leave the screen.
+    pending: Option<Pending>,
+    /// The area being translated again whenever its text changes.
+    watch: Option<Watch>,
+    last_capture: Option<LastCapture>,
+    /// Scale factor of the last capture, for a result that has to be rebuilt
+    /// without one at hand.
+    last_ppp: f32,
+    startup: Option<Startup>,
 
+    // ── The settings window ──────────────────────────────────────────────────
     settings_open: bool,
     /// The settings window has just been asked for and still needs to be
     /// brought to the front. An accessory application does not come forward
-    /// on its own — but doing it every frame, as this used to, means the
-    /// user cannot click away into another app at all.
+    /// on its own — but doing it every frame means the user cannot click away
+    /// into another app at all.
     settings_wants_focus: bool,
     settings_ui: SettingsUi,
     settings_dirty: bool,
 
-    pipeline: PipelineSlot,
-    update: Arc<Mutex<UpdateState>>,
+    update: SharedUpdate,
     ai_test: Arc<Mutex<Option<String>>>,
     ai_test_running: bool,
     /// Last value handed to the tray, so the animation is only poked on a change.
     tray_busy: bool,
+
+    /// Steps to carry out from a file, in a development build. See
+    /// [`automation`].
+    #[cfg(debug_assertions)]
+    script: Option<automation::Script>,
 
     should_exit: bool,
 }
@@ -98,6 +118,7 @@ impl App {
         cc: &eframe::CreationContext<'_>,
         settings: Settings,
         open_settings: Option<Section>,
+        startup: Option<Startup>,
     ) -> Self {
         cc.egui_ctx.set_fonts(crate::ui::theme::build_fonts());
 
@@ -123,8 +144,8 @@ impl App {
             .build()
             .expect("Failed to create the Tokio runtime");
 
-        let update = Arc::new(Mutex::new(UpdateState::Checking));
-        spawn_update_check(&rt, Arc::clone(&update), cc.egui_ctx.clone());
+        let update: SharedUpdate = Arc::new(Mutex::new(UpdateState::Checking));
+        updates::spawn_check(&rt, Arc::clone(&update), cc.egui_ctx.clone());
 
         let history = History::new(settings.history_limit);
 
@@ -137,17 +158,23 @@ impl App {
             tray,
             overlay: None,
             result: None,
-            desktop_image: None,
+            job: None,
+            job_events: channel(),
+            pending: None,
+            watch: None,
             last_capture: None,
+            last_ppp: 1.0,
+            startup,
             settings_open: open_settings.is_some(),
             settings_wants_focus: open_settings.is_some(),
             settings_ui: SettingsUi::new(open_settings.unwrap_or(Section::General)),
             settings_dirty: false,
-            pipeline: Arc::new(Mutex::new(None)),
             update,
             ai_test: Arc::new(Mutex::new(None)),
             ai_test_running: false,
             tray_busy: false,
+            #[cfg(debug_assertions)]
+            script: automation::Script::from_env(),
             should_exit: false,
         }
     }
@@ -155,18 +182,33 @@ impl App {
     // ── Input ────────────────────────────────────────────────────────────────
 
     fn drain_events(&mut self, ctx: &Context) {
+        if let Some(Startup::Area(bounds)) = self.startup.take() {
+            self.capture_area(ctx, bounds);
+        }
+        #[cfg(debug_assertions)]
+        self.run_script(ctx);
+
         for action in self.hotkeys.poll() {
             match action {
-                HotkeyAction::Region => self.begin_capture(ctx, CaptureMode::Region),
-                HotkeyAction::Window => self.begin_capture(ctx, CaptureMode::Window),
-                HotkeyAction::FullScreen => self.begin_capture(ctx, CaptureMode::FullScreen),
-                HotkeyAction::Repeat => self.repeat_last_capture(),
+                HotkeyAction::Region => {
+                    self.begin_capture(ctx, CaptureMode::Region, Purpose::Translate)
+                }
+                HotkeyAction::Window => {
+                    self.begin_capture(ctx, CaptureMode::Window, Purpose::Translate)
+                }
+                HotkeyAction::FullScreen => {
+                    self.begin_capture(ctx, CaptureMode::FullScreen, Purpose::Translate)
+                }
+                HotkeyAction::Repeat => self.repeat_last_capture(ctx),
+                HotkeyAction::Watch => self.watch_or_stop(ctx),
+                HotkeyAction::Hide => self.dismiss(),
             }
         }
 
         for event in self.tray.poll() {
             match event {
-                TrayEvent::Capture(mode) => self.begin_capture(ctx, mode),
+                TrayEvent::Capture(mode) => self.begin_capture(ctx, mode, Purpose::Translate),
+                TrayEvent::Watch => self.watch_or_stop(ctx),
                 TrayEvent::ShowSettings => {
                     self.settings_ui.on_open(&self.settings);
                     self.settings_open = true;
@@ -180,6 +222,24 @@ impl App {
         }
     }
 
+    /// The watch shortcut is a toggle: it starts a watch, and pressed again it
+    /// ends the one that is running.
+    fn watch_or_stop(&mut self, ctx: &Context) {
+        if self.is_watching() {
+            self.dismiss();
+        } else {
+            self.begin_capture(ctx, CaptureMode::Region, Purpose::Watch);
+        }
+    }
+
+    /// Takes the translation off the screen and stops whatever was producing
+    /// it.
+    fn dismiss(&mut self) {
+        self.stop_watching();
+        self.cancel_job();
+        self.result = None;
+    }
+
     fn shutdown(&mut self, ctx: &Context) {
         if self.settings_dirty {
             if let Err(e) = save_settings(&self.settings) {
@@ -187,304 +247,25 @@ impl App {
             }
             self.settings_dirty = false;
         }
+        self.cancel_job();
         self.hotkeys.shutdown();
         self.tray.shutdown();
         self.should_exit = true;
         ctx.send_viewport_cmd(ViewportCommand::Close);
     }
 
-    // ── Capture ──────────────────────────────────────────────────────────────
-
-    fn begin_capture(&mut self, ctx: &Context, mode: CaptureMode) {
-        if self.overlay.is_some() {
-            // Already picking a region; a second press should not stack overlays.
-            return;
-        }
-
-        // Anything on screen from the previous translation would end up baked
-        // into the frozen backdrop.
-        self.result = None;
-        ctx.request_repaint();
-
-        let desktop = virtual_desktop();
-        let ppp = ctx.pixels_per_point();
-        let geometry = Geometry::new(desktop, ppp);
-
-        let image = match capture_desktop_image() {
-            Ok((img, _)) => Some(img),
-            Err(e) => {
-                warn!(error = %e, "Could not capture the desktop for the overlay");
-                None
-            }
-        };
-
-        if mode == CaptureMode::FullScreen {
-            self.desktop_image = image;
-            self.start_translation(ctx, desktop, geometry);
-            return;
-        }
-
-        let mut state = OverlayState::new(geometry, mode, self.settings.show_mode_hud);
-        if let Some(img) = image {
-            self.desktop_image = Some(img.clone());
-            state = state.with_background(img);
-        }
-        // Always, not only when the capture starts in window mode: Tab switches
-        // modes while the overlay is up, and an empty list there means no window
-        // can be picked at all. Enumeration has to happen now, before our own
-        // full-screen overlay exists and becomes the only thing under the cursor.
-        let mut windows = window_pick::enumerate();
-        // The window that had focus is the likeliest target, so make sure it is
-        // in the list even if enumeration missed it.
-        if let Some(fg) = foreground_window_bounds() {
-            if !windows.iter().any(|w| w.bounds == fg) {
-                windows.insert(
-                    0,
-                    window_pick::WindowInfo {
-                        bounds: fg,
-                        title: String::new(),
-                    },
-                );
-            }
-        }
-        info!(
-            count = windows.len(),
-            "Window list captured for the overlay"
-        );
-        state = state.with_windows(windows);
-
-        self.overlay = Some(state);
-    }
-
-    fn repeat_last_capture(&mut self) {
-        let Some((bounds, geometry)) = self.last_capture else {
-            info!("Repeat requested but nothing has been captured yet");
-            return;
-        };
-        let ctx = egui::Context::default();
-        let _ = ctx;
-        self.spawn_pipeline(bounds, geometry, None);
-    }
-
-    fn start_translation(&mut self, ctx: &Context, bounds: Bounds, geometry: Geometry) {
-        self.spawn_pipeline(bounds, geometry, Some(ctx));
-    }
-
-    fn spawn_pipeline(&mut self, bounds: Bounds, geometry: Geometry, ctx: Option<&Context>) {
-        self.last_capture = Some((bounds, geometry));
-
-        let jpeg = match capture_region_for_ocr(bounds) {
-            Ok(j) => j,
-            Err(e) => {
-                error!(error = %e, "Capture failed");
-                self.show_stage(Stage::Error(e.user_message()), bounds, geometry);
-                return;
-            }
-        };
-
-        if self.settings.play_sound {
-            beep();
-        }
-
-        let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
-        self.show_stage(
-            Stage::Loading {
-                since: std::time::Instant::now(),
-            },
-            bounds,
-            geometry,
-        );
-
-        let params = PipelineParams::from(&self.settings);
-        let slot = Arc::clone(&self.pipeline);
-        let repaint = ctx.cloned();
-
-        self.rt.spawn(async move {
-            let outcome = run_pipeline(&jpeg, &params).await.map_err(|e| {
-                // Full detail to the log, a sentence to the screen — and a
-                // flag for whether this is a failure at all.
-                let empty = matches!(e, crate::shared::error::AppError::NoText);
-                if empty {
-                    info!("Capture contained no text");
-                } else {
-                    error!(error = %e, "Pipeline failed");
-                }
-                (e.user_message(), empty)
-            });
-            {
-                let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
-                *guard = Some((generation, outcome));
-            }
-            // Without this the result would sit in the slot until some other
-            // event happened to wake the UI thread.
-            if let Some(ctx) = repaint {
-                ctx.request_repaint();
-            }
-        });
-    }
-
-    fn show_stage(&mut self, stage: Stage, bounds: Bounds, geometry: Geometry) {
-        let mut ui = ResultUi::loading(self.settings.result_view, bounds, geometry)
-            .with_background(self.desktop_image.clone());
-        ui.pinned = self.settings.pin_result_window;
-        ui.stage = stage;
-        self.result = Some(ui);
-    }
-
-    fn collect_pipeline_result(&mut self) {
-        let taken = {
-            let mut guard = self.pipeline.lock().unwrap_or_else(|e| e.into_inner());
-            guard.take()
-        };
-        let Some((generation, outcome)) = taken else {
-            return;
-        };
-
-        // A newer capture has already superseded this one.
-        if generation != GENERATION.load(Ordering::SeqCst) {
-            info!(generation, "Dropping a superseded translation result");
-            return;
-        }
-
-        match outcome {
-            Ok(res) => {
-                info!(
-                    engine = res.engine.label(),
-                    total_ms = res.elapsed.as_millis() as u64,
-                    engine_ms = res.engine_elapsed.as_millis() as u64,
-                    cached = res.from_cache,
-                    "Capture complete"
-                );
-                if self.settings.copy_to_clipboard {
-                    if let Err(e) = copy_text_to_clipboard(&res.translated) {
-                        error!(error = %e, "Clipboard copy failed");
-                    }
-                }
-                if self.settings.keep_history {
-                    self.history.push(HistoryEntry {
-                        id: History::next_id(),
-                        original: res.original.clone(),
-                        translated: res.translated.clone(),
-                        source: res.source,
-                        target: res.target,
-                        engine: res.engine,
-                    });
-                }
-
-                if self.settings.result_view == ResultView::None {
-                    // Clipboard-only mode: nothing to show, and no empty popup.
-                    self.result = None;
-                    return;
-                }
-                if let Some(ui) = self.result.as_mut() {
-                    ui.stage = Stage::Done(Box::new(res));
-                }
-            }
-            Err((msg, empty)) => {
-                // Worth showing either way, even in clipboard-only mode:
-                // otherwise a capture that produced nothing is
-                // indistinguishable from one that worked.
-                let stage = if empty {
-                    Stage::Empty(msg)
-                } else {
-                    Stage::Error(msg)
-                };
-                if let Some(ui) = self.result.as_mut() {
-                    ui.stage = stage;
-                    if ui.view == ResultView::None {
-                        ui.view = ResultView::Popup;
-                    }
-                } else {
-                    let (bounds, geometry) = self
-                        .last_capture
-                        .unwrap_or((virtual_desktop(), Geometry::new(virtual_desktop(), 1.0)));
-                    self.show_stage(stage, bounds, geometry);
-                }
-            }
-        }
-    }
-
-    // ── Viewports ────────────────────────────────────────────────────────────
-
-    fn show_overlay(&mut self, ctx: &Context) {
-        let Some(mut state) = self.overlay.take() else {
-            return;
-        };
-        let geometry = state.geometry;
-        let theme = self.theme;
-
-        let builder = ViewportBuilder::default()
-            .with_position(geometry.window_pos_points())
-            .with_inner_size(geometry.window_size_points())
-            .with_decorations(false)
-            .with_resizable(false)
-            .with_taskbar(false)
-            .with_active(true)
-            .with_always_on_top();
-
-        // The title is never drawn — the window has no chrome — but on macOS it
-        // is how this window is picked out of `NSApp.windows` so it can be
-        // raised over the menu bar and the Dock.
-        //
-        // It is also created *inactive*: letting winit make it key straight away
-        // would activate the application, and an application that has not yet
-        // been told this window belongs on every Space gets pulled back to its
-        // own — taking the user out of the full-screen app they were reading.
-        // `present_overlay` orders it front and takes the keyboard instead.
-        #[cfg(target_os = "macos")]
-        let builder = builder
-            .with_title(crate::features::capture::mac_window::OVERLAY_TITLE)
-            .with_active(false);
-
-        ctx.show_viewport_immediate(
-            ViewportId::from_hash_of("sakura_capture"),
-            builder,
-            |ctx, _| {
-                // Without focus the overlay never sees a key press, and Esc does
-                // nothing however clearly the hint advertises it. macOS goes
-                // through AppKit instead: winit's focus call activates the
-                // application, which is exactly the Space-switch being avoided.
-                #[cfg(not(target_os = "macos"))]
-                if !ctx.input(|i| i.focused) {
-                    ctx.send_viewport_cmd(ViewportCommand::Focus);
-                }
-
-                // Re-applied each frame: the window is created by the frame
-                // before this one, and AppKit resets the frame if a display is
-                // reconfigured mid-capture.
-                #[cfg(target_os = "macos")]
-                crate::features::capture::mac_window::present_overlay(
-                    crate::features::capture::mac_window::OVERLAY_TITLE,
-                );
-
-                crate::features::capture::overlay::render(ctx, &theme, &mut state);
-                if state.cancelled || state.completed.is_some() {
-                    ctx.send_viewport_cmd(ViewportCommand::Close);
-                }
-            },
-        );
-
-        if state.cancelled {
-            info!("Capture cancelled");
-            self.settings.capture_mode = state.mode;
-            return;
-        }
-        if let Some(bounds) = state.completed {
-            self.settings.capture_mode = state.mode;
-            self.start_translation(ctx, bounds, geometry);
-            return;
-        }
-        self.overlay = Some(state);
-    }
+    // ── The result on screen ─────────────────────────────────────────────────
 
     fn show_result(&mut self, ctx: &Context) {
         let Some(mut ui) = self.result.take() else {
             return;
         };
         let theme = self.theme;
-        // Re-read every frame: toggling the setting should take effect on the
-        // result already on screen, not on the next one.
-        ui.close_on_focus_loss = self.settings.close_result_on_focus_loss;
+        // Re-read every frame: a change in the settings should take effect on
+        // the result already on screen, not on the next one.
+        ui.style = self.settings.presentation;
+        ui.close_on_click_away = self.settings.close_result_on_focus_loss;
+        ui.watching = self.is_watching();
         ui.render(ctx, &theme, self.history.len());
 
         let mut close = false;
@@ -505,160 +286,108 @@ impl App {
                     }
                 }
                 ResultAction::SwitchTo(view) => {
-                    ui.view = view;
+                    ui.set_view(view);
                     if view == ResultView::Window {
                         ui.pinned = self.settings.pin_result_window;
+                    }
+                }
+                ResultAction::ToggleWatch => {
+                    // Needs the result back in place to read its capture from.
+                    self.result = Some(ui);
+                    self.toggle_watch();
+                    match self.result.take() {
+                        Some(back) => ui = back,
+                        None => return,
                     }
                 }
                 ResultAction::Close => close = true,
             }
         }
 
-        if !close {
+        if close {
+            // Closing the translation of a watched area ends the watch: there
+            // is no point reading what nobody is being shown.
+            self.stop_watching();
+            self.cancel_job();
+        } else {
             self.result = Some(ui);
         }
     }
 
-    /// Starts the newly installed build and quits this one.
-    ///
-    /// Done here rather than inside the installer, which runs on a worker
-    /// thread and used to call `process::exit(0)` — that skipped saving the
-    /// settings, left the tray icon behind, and from the outside looked exactly
-    /// like the app crashing after a download.
-    fn restart_if_updated(&mut self, ctx: &Context) {
-        let path = {
-            let state = self.update.lock().unwrap_or_else(|e| e.into_inner());
-            match &*state {
-                UpdateState::Installed(path) => path.clone(),
-                _ => return,
-            }
+    /// Puts a sample subtitle on screen, so its size, place and opacity can be
+    /// tuned without capturing anything.
+    fn show_sample(&mut self, ctx: &Context) {
+        self.dismiss();
+
+        let monitor = cursor_position()
+            .map(|(x, y)| monitor_for(Bounds { x, y, w: 1, h: 1 }))
+            .unwrap_or_else(|| {
+                monitor_for(Bounds {
+                    x: 0,
+                    y: 0,
+                    w: 1,
+                    h: 1,
+                })
+            });
+        // Somewhere out of the subtitle's way: it steps aside from what it
+        // translates, and a sample translates nothing.
+        let anchor = Bounds {
+            x: monitor.bounds.x + monitor.bounds.w / 2,
+            y: monitor.bounds.y + monitor.bounds.h / 3,
+            w: 2,
+            h: 2,
         };
 
-        // The new copy opens on the About page, so the first thing the user sees
-        // is the version they just installed rather than an app that vanished.
-        match std::process::Command::new(&path)
-            .arg("--settings")
-            .arg("about")
-            .spawn()
-        {
-            Ok(_) => {
-                info!(path = %path.display(), "Restarting into the new version");
-                self.shutdown(ctx);
-            }
-            Err(e) => {
-                error!(error = %e, "Could not start the new version");
-                *self.update.lock().unwrap_or_else(|p| p.into_inner()) = UpdateState::Error(
-                    t("The update is installed but could not be started — open the program again")
-                        .to_string(),
-                );
-            }
-        }
-    }
-
-    /// Tells the user a new release exists, once per release.
-    ///
-    /// The app has no window of its own most of the time, so the only place a
-    /// notice would otherwise appear is a settings page nobody has open. The
-    /// version is remembered so the same release does not announce itself at
-    /// every launch — turning the setting off and on again does not replay it
-    /// either, which is the behaviour a user would expect from "notify me".
-    fn announce_update(&mut self) {
-        if !self.settings.notify_about_updates {
-            return;
-        }
-
-        let available = {
-            let state = self.update.lock().unwrap_or_else(|e| e.into_inner());
-            match &*state {
-                UpdateState::Available(info) => Some(info.version.clone()),
-                _ => None,
-            }
-        };
-        let Some(version) = available else { return };
-
-        if self.settings.notified_version == version {
-            return;
-        }
-        self.settings.notified_version.clone_from(&version);
-        self.settings_dirty = true;
-
-        info!(%version, "Notifying about a new release");
-        notify::show(
-            "Sakura Screen Translator",
-            &t("Version {version} is available. You can install it in Settings → About.")
-                .replace("{version}", &version),
+        let mut ui = ResultUi::new(
+            ResultView::Subtitle,
+            anchor,
+            monitor,
+            ctx.pixels_per_point(),
         );
+        ui.keep = true;
+        ui.set_stage(Stage::Done(Box::new(PipelineResult {
+            original: "You need the silver key to open this door.".to_string(),
+            translated: t("This is what a translated line will look like.").to_string(),
+            segments: Vec::new(),
+            engine: self
+                .settings
+                .engines
+                .active()
+                .first()
+                .copied()
+                .unwrap_or(EngineKind::Yandex),
+            source: crate::entities::language::Language::En,
+            target: self.settings.target_lang,
+            elapsed: Duration::ZERO,
+            engine_elapsed: Duration::ZERO,
+            from_cache: false,
+        })));
+        self.result = Some(ui);
     }
+
+    /// Holds Esc as a global shortcut for exactly as long as there is a
+    /// floating translation to dismiss with it.
+    ///
+    /// Not while an area is being watched: that translation stays up for as
+    /// long as the game is played, and Esc is the game's menu key.
+    fn sync_escape(&self) {
+        let wanted = native::QUIET_WINDOWS
+            && self.settings.presentation.esc_hides
+            && self.overlay.is_none()
+            && !self.is_watching()
+            && self
+                .result
+                .as_ref()
+                .is_some_and(|ui| ui.effective_view().floats());
+        self.hotkeys.set_dismiss(wanted);
+    }
+
+    // ── The settings window ──────────────────────────────────────────────────
 
     fn show_settings(&mut self, ctx: &Context) {
         let mut close = false;
         let theme = self.theme;
-
-        // Filled in while reading the update state, so the row can draw a bar.
-        let mut progress: Option<f32> = None;
-        let (status, check_enabled, install_enabled, install_url) = {
-            let st = self.update.lock().unwrap_or_else(|e| e.into_inner());
-            match &*st {
-                UpdateState::Checking => {
-                    (t("Checking for updates…").to_string(), false, false, None)
-                }
-                UpdateState::UpToDate => (
-                    t("You are on the latest version ({version})")
-                        .replace("{version}", env!("CARGO_PKG_VERSION")),
-                    true,
-                    false,
-                    None,
-                ),
-                UpdateState::Available(info) => (
-                    if info.size > 0 {
-                        t("Version {version} is available · {size} MB")
-                            .replace("{version}", &info.version)
-                            .replace(
-                                "{size}",
-                                &format!("{:.1}", info.size as f64 / (1024.0 * 1024.0)),
-                            )
-                    } else {
-                        t("Version {version} is available").replace("{version}", &info.version)
-                    },
-                    true,
-                    true,
-                    Some(info.url.clone()),
-                ),
-                UpdateState::Downloading { received, total } => {
-                    // A ten-megabyte download with no sign of movement looks
-                    // like a hang. Bytes when the server gives a length, and
-                    // a running total when it does not.
-                    let text = if *total > 0 {
-                        t("Downloading the update… {done} of {total} MB")
-                            .replace("{done}", &format!("{:.1}", *received as f64 / 1048576.0))
-                            .replace("{total}", &format!("{:.1}", *total as f64 / 1048576.0))
-                    } else {
-                        t("Downloading the update… {done} MB")
-                            .replace("{done}", &format!("{:.1}", *received as f64 / 1048576.0))
-                    };
-                    progress = if *total > 0 {
-                        Some(*received as f32 / *total as f32)
-                    } else {
-                        None
-                    };
-                    (text, false, false, None)
-                }
-                UpdateState::Installed(_) => (
-                    t("Update installed — restarting…").to_string(),
-                    false,
-                    false,
-                    None,
-                ),
-                UpdateState::Error(e) => (
-                    // Already a sentence written for the user; wrapping it in
-                    // "Error:" only makes it look like a crash report.
-                    e.clone(),
-                    true,
-                    false,
-                    None,
-                ),
-            }
-        };
+        let update = self.update_row();
 
         let ai_status = self
             .ai_test
@@ -667,27 +396,29 @@ impl App {
             .clone()
             .unwrap_or_default();
         let rejected = self.hotkeys.rejected();
+        let quiet = stays_in_background();
 
-        let mut builder = ViewportBuilder::default()
+        let builder = ViewportBuilder::default()
             .with_title(t("Sakura Screen Translator — Settings"))
-            .with_inner_size([785.0, 662.0])
-            .with_min_inner_size([680.0, 460.0]);
-        builder = builder.with_icon(Arc::new(load_app_icon()));
+            .with_inner_size([820.0, 680.0])
+            .with_min_inner_size([700.0, 480.0])
+            .with_active(!quiet)
+            .with_icon(Arc::new(load_app_icon()));
 
         // Read before the closure borrows `self`.
-        let wants_focus = std::mem::take(&mut self.settings_wants_focus);
+        let wants_focus = std::mem::take(&mut self.settings_wants_focus) && !quiet;
 
         let mut settings = self.settings.clone();
-        let mut out = crate::features::settings::ui::SettingsOutput::default();
+        let mut out = SettingsOutput::default();
 
         ctx.show_viewport_immediate(
             ViewportId::from_hash_of("sakura_settings"),
             builder,
             |ctx, _| {
-                // Once, when the window is asked for. An accessory
-                // application does not come forward on its own, but doing
-                // this every frame pins the focus here and the user cannot
-                // switch to anything else while settings are open.
+                // Once, when the window is asked for. An accessory application
+                // does not come forward on its own, but doing this every frame
+                // pins the focus here and the user cannot switch to anything
+                // else while settings are open.
                 if wants_focus {
                     #[cfg(target_os = "macos")]
                     crate::features::capture::mac_window::activate();
@@ -700,10 +431,10 @@ impl App {
                     &theme,
                     &mut settings,
                     &SettingsContext {
-                        update_status: &status,
-                        update_check_enabled: check_enabled,
-                        update_install_enabled: install_enabled,
-                    update_progress: progress,
+                        update_status: &update.status,
+                        update_check_enabled: update.can_check,
+                        update_install_enabled: update.can_install,
+                        update_progress: update.progress,
                         ai_test_status: &ai_status,
                         ai_test_running: self.ai_test_running,
                         rejected_hotkeys: &rejected,
@@ -721,11 +452,15 @@ impl App {
             },
         );
 
-        self.apply_settings_changes(ctx, settings, out, install_url);
+        self.apply_settings_changes(ctx, settings, out, update.url);
 
         if close {
             self.settings_open = false;
             self.settings_ui.on_close();
+            // A sample put up from this window has no business outliving it.
+            if self.result.as_ref().is_some_and(|ui| ui.keep) {
+                self.result = None;
+            }
             if let Err(e) = save_settings(&self.settings) {
                 error!(error = %e, "Could not save settings");
             } else {
@@ -738,7 +473,7 @@ impl App {
         &mut self,
         ctx: &Context,
         next: Settings,
-        out: crate::features::settings::ui::SettingsOutput,
+        out: SettingsOutput,
         install_url: Option<String>,
     ) {
         let theme_changed = next.theme != self.settings.theme;
@@ -809,54 +544,29 @@ impl App {
             open_folder(&logging::default_log_dir());
         }
         if out.check_update {
-            *self.update.lock().unwrap_or_else(|e| e.into_inner()) = UpdateState::Checking;
-            spawn_update_check(&self.rt, Arc::clone(&self.update), egui::Context::default());
+            self.check_for_update(ctx);
         }
         if out.install_update {
             if let Some(url) = install_url {
-                *self.update.lock().unwrap_or_else(|e| e.into_inner()) =
-                    UpdateState::Downloading {
-                        received: 0,
-                        total: 0,
-                    };
-                let state = Arc::clone(&self.update);
-                let repaint = ctx.clone();
-                self.rt.spawn(async move {
-                    let progress_state = Arc::clone(&state);
-                    let progress_ctx = repaint.clone();
-                    let outcome = download_and_apply(&url, move |received, total| {
-                        *progress_state.lock().unwrap_or_else(|p| p.into_inner()) =
-                            UpdateState::Downloading { received, total };
-                        // The window is idle while this runs; without a nudge
-                        // the bar would only move when something else happened
-                        // to wake it.
-                        progress_ctx.request_repaint();
-                    })
-                    .await;
-
-                    *state.lock().unwrap_or_else(|p| p.into_inner()) = match outcome {
-                        Ok(path) => UpdateState::Installed(path),
-                        Err(e) => {
-                            error!(error = %e, "Update failed");
-                            UpdateState::Error(e)
-                        }
-                    };
-                    repaint.request_repaint();
-                });
+                self.install_update(ctx, url);
             }
         }
         if out.test_ai && !self.ai_test_running {
-            self.start_ai_test();
+            self.start_ai_test(ctx);
+        }
+        if out.show_sample {
+            self.show_sample(ctx);
         }
     }
 
-    fn start_ai_test(&mut self) {
+    fn start_ai_test(&mut self, ctx: &Context) {
         self.ai_test_running = true;
         *self.ai_test.lock().unwrap_or_else(|e| e.into_inner()) = Some(t("Checking…").to_string());
 
         let cfg = self.settings.engines.ai_config.clone();
         let target = self.settings.target_lang;
         let slot = Arc::clone(&self.ai_test);
+        let repaint = ctx.clone();
 
         self.rt.spawn(async move {
             use crate::entities::language::Language;
@@ -874,9 +584,10 @@ impl App {
             let msg = match ai::translate(&req, &cfg).await {
                 Ok(reply) => t("✓ Got a reply: {reply}")
                     .replace("{reply}", logging::clip(reply.trim(), 60)),
-                Err(e) => format!("✗ {e}"),
+                Err(e) => format!("✗ {}", e.user_message()),
             };
             *slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(msg);
+            repaint.request_repaint();
         });
     }
 
@@ -895,10 +606,7 @@ impl App {
         }
     }
 
-    /// True while a capture is waiting on OCR or a translation engine.
-    fn is_translating(&self) -> bool {
-        self.result.as_ref().is_some_and(ResultUi::is_loading)
-    }
+    // ── Housekeeping ─────────────────────────────────────────────────────────
 
     /// Tells the tray to spin its icon while work is in flight. Sent only on a
     /// change; the tray runs the animation itself from there.
@@ -917,16 +625,34 @@ impl App {
         }
     }
 
-    /// Repaint only as often as something is actually moving. The original asked
-    /// for 20 fps forever, which kept a tray app's CPU busy around the clock.
+    /// Repaint only as often as something is actually moving. An idle tray app
+    /// that draws twenty frames a second keeps a CPU core warm around the
+    /// clock for nothing.
     fn schedule_repaint(&self, ctx: &Context) {
-        let busy = self.overlay.is_some()
-            || self.result.as_ref().is_some_and(ResultUi::is_loading)
-            || self.ai_test_running;
+        let moving = self.overlay.is_some()
+            || self.pending.is_some()
+            || self.ai_test_running
+            || self.result.as_ref().is_some_and(ResultUi::is_animating);
 
-        let interval = if busy {
-            Duration::from_millis(33)
-        } else if self.result.is_some() || self.settings_open {
+        let interval = if moving {
+            Duration::from_millis(16)
+        } else if let Some(ui) = &self.result {
+            // A floating view cannot tell from focus that the user clicked
+            // somewhere else; it has to look, and often enough not to miss a
+            // click.
+            let polls_the_mouse = native::QUIET_WINDOWS
+                && ui.effective_view().floats()
+                && self.settings.close_result_on_focus_loss
+                && !self.is_watching()
+                && !ui.keep;
+            if polls_the_mouse {
+                Duration::from_millis(40)
+            } else {
+                Duration::from_millis(100)
+            }
+        } else if self.is_watching() {
+            Duration::from_millis(self.settings.watch_interval_ms.clamp(300, 5000) as u64 / 2)
+        } else if self.settings_open {
             Duration::from_millis(100)
         } else {
             // Idle: just often enough to notice a tray or hotkey event that
@@ -940,7 +666,9 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         self.drain_events(ctx);
-        self.collect_pipeline_result();
+        self.collect_job_events();
+        self.run_pending(ctx);
+        self.tick_watch(ctx);
         self.poll_ai_test();
         self.sync_tray_activity(ctx);
         self.announce_update();
@@ -955,6 +683,7 @@ impl eframe::App for App {
         if self.settings_open {
             self.show_settings(ctx);
         }
+        self.sync_escape();
 
         // The host window is a 1×1 placeholder parked off screen; closing it
         // would take the whole app down, which only the tray Exit may do.
@@ -965,7 +694,15 @@ impl eframe::App for App {
         self.schedule_repaint(ctx);
     }
 
+    /// The host window is asked for with an alpha channel so that the floating
+    /// views — which share its GL configuration — can have one too. Nothing is
+    /// ever drawn into it.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0, 0.0, 0.0, 0.0]
+    }
+
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.cancel_job();
         self.hotkeys.shutdown();
         self.tray.shutdown();
         if self.settings_dirty {
@@ -983,24 +720,6 @@ fn settings_equal(a: &Settings, b: &Settings) -> bool {
         (Ok(x), Ok(y)) => x == y,
         _ => false,
     }
-}
-
-fn spawn_update_check(rt: &tokio::runtime::Runtime, state: Arc<Mutex<UpdateState>>, ctx: Context) {
-    rt.spawn(async move {
-        let next = match check_for_update().await {
-            Ok(Some(info)) => {
-                info!(version = %info.version, "Update available");
-                UpdateState::Available(info)
-            }
-            Ok(None) => UpdateState::UpToDate,
-            Err(e) => {
-                warn!(error = %e, "Update check failed");
-                UpdateState::Error(e)
-            }
-        };
-        *state.lock().unwrap_or_else(|p| p.into_inner()) = next;
-        ctx.request_repaint();
-    });
 }
 
 fn load_app_icon() -> egui::IconData {
@@ -1059,8 +778,3 @@ fn beep() {
         }
     }
 }
-
-// Keeps the widget module referenced even in builds where nothing else uses it
-// directly from here.
-#[allow(unused)]
-type _Widgets = widgets::IconFn;

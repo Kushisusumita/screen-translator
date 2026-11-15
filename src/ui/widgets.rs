@@ -14,7 +14,7 @@ use egui::{
 };
 
 use super::platform::NavStyle;
-use super::theme::{text, Theme};
+use super::theme::{text, wash, Theme};
 
 pub type IconFn = fn(&Painter, Rect, Color32);
 
@@ -50,7 +50,7 @@ pub fn glass_frame(theme: &Theme) -> egui::Frame {
     egui::Frame::none()
         .fill(theme.glass)
         .rounding(theme.surface_rounding())
-        .stroke(Stroke::new(1.0, theme.border))
+        .stroke(Stroke::new(1.0_f32, theme.border))
         .shadow(egui::epaint::Shadow {
             offset: egui::vec2(0.0, 16.0),
             blur: 44.0,
@@ -217,7 +217,7 @@ pub fn row<R>(
         ui.painter().hline(
             (bg.min.x + inset)..=(bg.max.x - inset),
             bg.max.y,
-            Stroke::new(1.0, theme.separator),
+            Stroke::new(1.0_f32, theme.separator),
         );
     }
 
@@ -251,9 +251,9 @@ pub fn toggle(ui: &mut Ui, theme: &Theme, on: &mut bool) -> Response {
     } else if resp.hovered() {
         theme.control_fill_hover()
     } else if theme.dark {
-        Color32::from_rgba_unmultiplied(255, 255, 255, 40)
+        wash(255, 255, 255, 40)
     } else {
-        Color32::from_rgba_unmultiplied(0, 0, 0, 42)
+        wash(0, 0, 0, 42)
     };
     p.rect_filled(rect, rounding, track);
 
@@ -425,7 +425,7 @@ pub fn hotkey_badge(ui: &mut Ui, theme: &Theme, label: &str, recording: bool) ->
         // The one dashed outline left in the app: "waiting for a keypress" is a
         // state no fill communicates.
         p.rect_filled(rect, rounding, theme.tint(theme.accent, 22));
-        dashed_rect(p, rect, rounding, Stroke::new(1.2, theme.accent));
+        dashed_rect(p, rect, rounding, Stroke::new(1.2_f32, theme.accent));
     } else {
         let fill = if resp.hovered() {
             theme.control_fill_hover()
@@ -500,7 +500,7 @@ pub fn segmented(
     let selected_fill = if use_accent {
         theme.accent
     } else {
-        Color32::from_rgba_unmultiplied(255, 255, 255, 235)
+        wash(255, 255, 255, 235)
     };
     let selected_fg = if use_accent {
         theme.on_accent
@@ -520,7 +520,7 @@ pub fn segmented(
                     let fg = if on {
                         selected_fg
                     } else {
-                        Color32::from_rgba_unmultiplied(255, 255, 255, 210)
+                        wash(255, 255, 255, 210)
                     };
                     let galley =
                         ui.painter()
@@ -536,7 +536,7 @@ pub fn segmented(
                         ui.painter().rect_filled(
                             rect,
                             theme.control_rounding(),
-                            Color32::from_rgba_unmultiplied(255, 255, 255, 28),
+                            wash(255, 255, 255, 28),
                         );
                     }
 
@@ -572,7 +572,7 @@ const OVERLAY_SURFACE: Color32 = Color32::from_rgba_premultiplied(38, 38, 42, 22
 
 /// A standalone action on the capture overlay, styled to match the mode strip.
 pub fn overlay_button(ui: &mut Ui, theme: &Theme, icon: IconFn, label: &str) -> Response {
-    let fg = Color32::from_rgba_unmultiplied(255, 255, 255, 228);
+    let fg = wash(255, 255, 255, 228);
     let galley = ui
         .painter()
         .layout_no_wrap(label.to_owned(), text::small(), fg);
@@ -582,9 +582,9 @@ pub fn overlay_button(ui: &mut Ui, theme: &Theme, icon: IconFn, label: &str) -> 
 
     let p = ui.painter();
     let fill = if resp.is_pointer_button_down_on() {
-        Color32::from_rgba_unmultiplied(74, 74, 80, 240)
+        wash(74, 74, 80, 240)
     } else if resp.hovered() {
-        Color32::from_rgba_unmultiplied(60, 60, 66, 236)
+        wash(60, 60, 66, 236)
     } else {
         OVERLAY_SURFACE
     };
@@ -677,7 +677,7 @@ pub fn sidebar_item(
             icon_rect,
             Rounding::same(5.0),
             if selected {
-                Color32::from_rgba_unmultiplied(255, 255, 255, 64)
+                wash(255, 255, 255, 64)
             } else {
                 tile
             },
@@ -747,6 +747,9 @@ pub struct SelectCard<'a> {
 }
 
 impl<'a> SelectCard<'a> {
+    /// How tall a card is unless told otherwise.
+    pub const HEIGHT: f32 = 52.0;
+
     pub fn new(title: &'a str, subtitle: &'a str) -> Self {
         Self {
             title,
@@ -754,7 +757,7 @@ impl<'a> SelectCard<'a> {
             selected: false,
             ready: false,
             width: 0.0,
-            height: 52.0,
+            height: Self::HEIGHT,
         }
     }
 
@@ -788,7 +791,7 @@ pub fn select_card(ui: &mut Ui, theme: &Theme, card: SelectCard<'_>) -> Response
     let rounding = theme.group_rounding();
 
     let fill = if card.selected {
-        theme.tint(theme.accent, if theme.dark { 38 } else { 24 })
+        theme.tint(theme.accent, if theme.dark { 46 } else { 26 })
     } else if resp.is_pointer_button_down_on() {
         theme.control_fill_active()
     } else if resp.hovered() {
@@ -799,6 +802,13 @@ pub fn select_card(ui: &mut Ui, theme: &Theme, card: SelectCard<'_>) -> Response
     p.rect_filled(rect, rounding, fill);
 
     if card.selected {
+        // The wash alone is a quiet difference; the outline is what makes the
+        // chosen card the first thing seen.
+        p.rect_stroke(
+            rect.shrink(0.5),
+            rounding,
+            Stroke::new(1.0_f32, theme.tint(theme.accent, if theme.dark { 120 } else { 150 })),
+        );
         let bar = Rect::from_min_size(
             egui::pos2(rect.min.x, rect.center().y - 11.0),
             Vec2::new(3.0, 22.0),
@@ -848,13 +858,13 @@ pub fn separator(ui: &mut Ui, theme: &Theme) {
     ui.painter().hline(
         rect.x_range(),
         rect.center().y,
-        Stroke::new(1.0, theme.separator),
+        Stroke::new(1.0_f32, theme.separator),
     );
 }
 
 /// Rounded status pill anchored to the bottom of the capture overlay.
 pub fn hint_pill(ui: &mut Ui, theme: &Theme, label: &str) {
-    let fg = Color32::from_rgba_unmultiplied(255, 255, 255, 200);
+    let fg = wash(255, 255, 255, 200);
     let galley = ui
         .painter()
         .layout_no_wrap(label.to_owned(), text::caption(), fg);
@@ -864,7 +874,7 @@ pub fn hint_pill(ui: &mut Ui, theme: &Theme, label: &str) {
     ui.painter().rect_filled(
         rect,
         Rounding::same(14.0),
-        Color32::from_rgba_unmultiplied(0, 0, 0, 115),
+        wash(0, 0, 0, 115),
     );
     ui.painter()
         .galley(rect.center() - galley.size() / 2.0, galley, fg);

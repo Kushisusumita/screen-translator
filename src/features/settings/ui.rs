@@ -15,8 +15,8 @@ use egui::{Color32, Sense, Vec2};
 use crate::entities::history::{History, HistoryEntry};
 use crate::entities::language::Language;
 use crate::entities::settings::{
-    AiProtocol, CaptureMode, EngineKind, Hotkey, HotkeyAction, ResultView, Settings, AI_PRESETS,
-    MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT,
+    bindable_alone, AiProtocol, AutoHide, EngineKind, Hotkey, HotkeyAction, ResultView, Settings,
+    SubtitlePlace, SubtitleSize, AI_PRESETS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT,
 };
 use crate::shared::i18n::{t, Lang};
 use crate::shared::secret::{sealing_available, Secret};
@@ -86,11 +86,11 @@ impl Section {
     /// Extra words the search should match beyond the visible label.
     fn keywords(self) -> &'static str {
         match self {
-            Section::General => t("autostart clipboard tray icon notifications history"),
-            Section::Keys => t("hotkey shortcut keys keyboard tab"),
+            Section::General => t("autostart clipboard tray icon notifications watch area interval"),
+            Section::Keys => t("hotkey shortcut keys keyboard tab watch hide repeat"),
             Section::Languages => t("translate language source target"),
             Section::Engine => t("yandex google deepl ai openai anthropic gemini key token model"),
-            Section::Appearance => t("theme light dark popup window appearance"),
+            Section::Appearance => t("theme light dark popup window subtitles overlay opacity hide"),
             Section::History => t("history translations recent clear memory"),
             Section::Logs => t("log journal debug privacy"),
             Section::About => t("version update license author donate"),
@@ -175,6 +175,8 @@ pub struct SettingsOutput {
     pub test_ai: bool,
     pub open_log_dir: bool,
     pub clear_history: bool,
+    /// Put a sample subtitle on screen.
+    pub show_sample: bool,
 }
 
 pub struct SettingsUi {
@@ -328,7 +330,7 @@ impl SettingsUi {
                             Section::Keys => self.keys(ui, theme, settings, info, &mut out),
                             Section::Languages => self.languages(ui, theme, settings),
                             Section::Engine => self.engine(ui, theme, settings, info, &mut out),
-                            Section::Appearance => self.appearance(ui, theme, settings),
+                            Section::Appearance => self.appearance(ui, theme, settings, &mut out),
                             Section::History => self.history(ui, theme, settings, info, &mut out),
                             Section::Logs => self.logs(ui, theme, settings, info, &mut out),
                             Section::About => self.about(ui, theme, settings, info, &mut out),
@@ -434,14 +436,19 @@ impl SettingsUi {
         });
 
         if s.hide_tray_icon {
-            notice(
-                ui,
-                theme,
-                theme.warning,
-                &t("Without the icon this window can only be reopened by starting the app \
-                    with --settings. Capture stays on {hotkey}.")
-                .replace("{hotkey}", &s.hotkeys.region.display()),
-            );
+            // With the icon gone the shortcut is the only way in, so whether
+            // there is one decides what the warning has to say.
+            let message = if s.hotkeys.region.is_bound() {
+                t("Without the icon this window can only be reopened by starting the app \
+                   with --settings. Capture stays on {hotkey}.")
+                .replace("{hotkey}", &s.hotkeys.region.display())
+            } else {
+                t("Without the icon this window can only be reopened by starting the app \
+                   with --settings. No capture shortcut is set either, so nothing would \
+                   start a capture.")
+                .to_string()
+            };
+            notice(ui, theme, theme.warning, &message);
         }
         if s.produces_no_output() {
             notice(
@@ -453,23 +460,38 @@ impl SettingsUi {
             );
         }
 
-        widgets::section_caption(ui, theme, t("Default capture mode"));
+        widgets::section_caption(ui, theme, t("Watching an area"));
         widgets::list(ui, theme, |ui| {
-            let modes = CaptureMode::all();
-            for (i, mode) in modes.into_iter().enumerate() {
-                let spec = RowSpec::new(mode.label_menu());
-                let spec = if i == modes.len() - 1 {
-                    spec.last()
-                } else {
-                    spec
-                };
-                widgets::row(ui, theme, spec, |ui| {
-                    if radio_dot(ui, theme, s.capture_mode == mode).clicked() {
-                        s.capture_mode = mode;
+            widgets::row(
+                ui,
+                theme,
+                RowSpec::new(t("Look for new text every"))
+                    .icon(icons::eye)
+                    .subtitle(t("A watched area is translated again when its text changes"))
+                    .last(),
+                |ui| {
+                    let mut seconds = s.watch_interval_ms as f32 / 1000.0;
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut seconds)
+                                .range(0.3..=5.0)
+                                .speed(0.05)
+                                .fixed_decimals(1)
+                                .suffix(t(" s")),
+                        )
+                        .changed()
+                    {
+                        s.watch_interval_ms = (seconds * 1000.0).round() as u32;
                     }
-                });
-            }
+                },
+            );
         });
+        hint(
+            ui,
+            theme,
+            t("Start watching from the tray menu or with its shortcut, select the dialogue box \
+               once, and every new line is translated as it appears. The same shortcut stops it."),
+        );
     }
 
     // ── Сочетания клавиш ─────────────────────────────────────────────────────
@@ -498,7 +520,9 @@ impl SettingsUi {
             for (i, action) in actions.into_iter().enumerate() {
                 let recording = self.recording == Some(action);
                 let hk = *s.hotkeys.slot_mut(action);
-                let spec = RowSpec::new(action.label()).highlighted(recording);
+                let spec = RowSpec::new(action.label())
+                    .subtitle(action.hint())
+                    .highlighted(recording);
                 let spec = if i == actions.len() - 1 {
                     spec.last()
                 } else {
@@ -598,6 +622,12 @@ impl SettingsUi {
             theme,
             t("Shortcuts work in any program, including full-screen games."),
         );
+        hint(
+            ui,
+            theme,
+            t("F1–F12, Insert, Delete, Home, End, Page Up and Page Down can be bound on their \
+               own, without Ctrl, Alt or Shift — handy when both hands are on the game."),
+        );
     }
 
     // ── Языки ────────────────────────────────────────────────────────────────
@@ -674,7 +704,9 @@ impl SettingsUi {
         let mut move_up: Option<usize> = None;
         for (i, kind) in order.iter().enumerate() {
             let kind = *kind;
-            ui.horizontal(|ui| {
+            let row = Vec2::new(ui.available_width(), widgets::SelectCard::HEIGHT);
+            let centred = egui::Layout::left_to_right(egui::Align::Center);
+            ui.allocate_ui_with_layout(row, centred, |ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 // Reserve the trailing reorder button before measuring the card.
                 // The slot is reserved even for the first row, which has no
@@ -702,10 +734,14 @@ impl SettingsUi {
                     out.engines_changed = true;
                 }
                 if i > 0 {
-                    if ui
-                        .small_button("↑")
-                        .on_hover_text(t("Move up the queue"))
-                        .clicked()
+                    if widgets::icon_button(
+                        ui,
+                        theme,
+                        icons::arrow_up,
+                        REORDER_SLOT - 8.0,
+                        t("Move up the queue"),
+                    )
+                    .clicked()
                     {
                         move_up = Some(i);
                     }
@@ -845,16 +881,33 @@ impl SettingsUi {
             widgets::row(
                 ui,
                 theme,
-                RowSpec::new(t("Temperature")).subtitle(t("Lower is more literal and predictable")),
+                RowSpec::new(t("Let the model read the screenshot"))
+                    .subtitle(t("No separate text recognition; needs a model that accepts images")),
                 |ui| {
-                    ui.add(
-                        egui::DragValue::new(&mut s.engines.ai_config.temperature)
-                            .range(0.0..=1.5)
-                            .speed(0.05)
-                            .fixed_decimals(2),
-                    );
+                    if widgets::toggle(ui, theme, &mut s.engines.ai_config.vision).changed() {
+                        out.engines_changed = true;
+                    }
                 },
             );
+            // Claude models choose their own sampling and reject a request
+            // that tries to; offering the dial there would be offering a way
+            // to break the engine.
+            if s.engines.ai_config.protocol != AiProtocol::Anthropic {
+                widgets::row(
+                    ui,
+                    theme,
+                    RowSpec::new(t("Temperature"))
+                        .subtitle(t("Lower is more literal and predictable")),
+                    |ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut s.engines.ai_config.temperature)
+                                .range(0.0..=1.5)
+                                .speed(0.05)
+                                .fixed_decimals(2),
+                        );
+                    },
+                );
+            }
             widgets::row(
                 ui,
                 theme,
@@ -871,6 +924,23 @@ impl SettingsUi {
             );
         });
 
+        if s.engines.ai_config.vision && !s.engines.reads_screenshots() {
+            notice(
+                ui,
+                theme,
+                theme.warning,
+                t("The model reads screenshots only while the AI engine is switched on, \
+                   configured and first in the queue."),
+            );
+        } else if s.engines.ai_config.vision {
+            hint(
+                ui,
+                theme,
+                t("Used for a region you select. A whole window or screen is still recognised \
+                   first, so each paragraph can be put back in its place."),
+            );
+        }
+
         ui.add_space(10.0);
         ui.label(
             egui::RichText::new(t("Extra instructions for the model"))
@@ -882,7 +952,7 @@ impl SettingsUi {
             egui::TextEdit::multiline(&mut s.engines.ai_config.extra_instructions)
                 .desired_rows(2)
                 .desired_width(f32::INFINITY)
-                .hint_text(t("For example: keep it informal, do not translate command names")),
+                .hint_text(t("For example: this is a fantasy RPG; keep it informal, leave names as they are")),
         );
 
         ui.add_space(10.0);
@@ -938,7 +1008,13 @@ impl SettingsUi {
 
     // ── Внешний вид ──────────────────────────────────────────────────────────
 
-    fn appearance(&mut self, ui: &mut egui::Ui, theme: &Theme, s: &mut Settings) {
+    fn appearance(
+        &mut self,
+        ui: &mut egui::Ui,
+        theme: &Theme,
+        s: &mut Settings,
+        out: &mut SettingsOutput,
+    ) {
         widgets::list(ui, theme, |ui| {
             widgets::row(
                 ui,
@@ -970,25 +1046,155 @@ impl SettingsUi {
             ui.add_space(6.0);
         }
 
-        widgets::section_caption(ui, theme, t("Result window"));
+        // What the three floating views have in common: how they leave.
+        widgets::section_caption(ui, theme, t("Taking the translation away"));
         widgets::list(ui, theme, |ui| {
             widgets::row(
                 ui,
                 theme,
-                RowSpec::new(t("Keep on top of other windows"))
-                    .subtitle(t("The translation window stays in front")),
+                RowSpec::new(t("Hide by itself"))
+                    .icon(icons::clock)
+                    .subtitle(t("How long a translation stays on screen")),
                 |ui| {
-                    widgets::toggle(ui, theme, &mut s.pin_result_window);
+                    egui::ComboBox::from_id_salt("auto_hide")
+                        .selected_text(s.presentation.auto_hide.label())
+                        .width(190.0)
+                        .show_ui(ui, |ui| {
+                            for option in AutoHide::all() {
+                                ui.selectable_value(
+                                    &mut s.presentation.auto_hide,
+                                    option,
+                                    option.label(),
+                                );
+                            }
+                        });
                 },
             );
             widgets::row(
                 ui,
                 theme,
-                RowSpec::new(t("Close when it loses focus"))
-                    .subtitle(t("Clicking outside dismisses the translation"))
+                RowSpec::new(t("Hide when I click somewhere else"))
+                    .subtitle(t("The next click anywhere dismisses the translation")),
+                |ui| {
+                    ui.add_enabled_ui(!s.presentation.click_through, |ui| {
+                        widgets::toggle(ui, theme, &mut s.close_result_on_focus_loss);
+                    });
+                },
+            );
+            // Where a floating view can hold the focus, Esc reaches it the
+            // ordinary way and there is nothing to switch on.
+            if crate::features::capture::native::QUIET_WINDOWS {
+                widgets::row(
+                    ui,
+                    theme,
+                    RowSpec::new(t("Esc hides the translation"))
+                        .subtitle(t("Works from any program while a translation is showing")),
+                    |ui| {
+                        widgets::toggle(ui, theme, &mut s.presentation.esc_hides);
+                    },
+                );
+            }
+            widgets::row(
+                ui,
+                theme,
+                RowSpec::new(t("Let clicks pass through"))
+                    .subtitle(t("The mouse reaches the game under the translation"))
                     .last(),
                 |ui| {
-                    widgets::toggle(ui, theme, &mut s.close_result_on_focus_loss);
+                    widgets::toggle(ui, theme, &mut s.presentation.click_through);
+                },
+            );
+        });
+        if s.presentation.click_through {
+            hint(
+                ui,
+                theme,
+                t("A translation that lets clicks through cannot be clicked away. \
+                   It leaves on Esc, on its timer, on the “Hide the translation” shortcut, \
+                   or at the next capture."),
+            );
+        }
+
+        widgets::section_caption(ui, theme, t("Subtitles"));
+        widgets::list(ui, theme, |ui| {
+            widgets::row(
+                ui,
+                theme,
+                RowSpec::new(t("Text size")).subtitle(t("Scales with the screen")),
+                |ui| {
+                    // Laid out right to left, so the last option is added first.
+                    for size in SubtitleSize::all().into_iter().rev() {
+                        let active = s.presentation.subtitle_size == size;
+                        if preset_chip(ui, theme, size.label(), active).clicked() {
+                            s.presentation.subtitle_size = size;
+                        }
+                    }
+                },
+            );
+            widgets::row(
+                ui,
+                theme,
+                RowSpec::new(t("Position")).subtitle(t("Moves aside if it would cover the text")),
+                |ui| {
+                    for place in SubtitlePlace::all().into_iter().rev() {
+                        let active = s.presentation.subtitle_place == place;
+                        if preset_chip(ui, theme, place.label(), active).clicked() {
+                            s.presentation.subtitle_place = place;
+                        }
+                    }
+                },
+            );
+            widgets::row(
+                ui,
+                theme,
+                RowSpec::new(t("Background")).subtitle(t("How solid the plate behind the text is")),
+                |ui| {
+                    let mut percent = s.presentation.subtitle_opacity as u32;
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut percent, 20..=100)
+                                .suffix("%")
+                                .trailing_fill(true),
+                        )
+                        .changed()
+                    {
+                        s.presentation.subtitle_opacity = percent as u8;
+                    }
+                },
+            );
+            widgets::row(
+                ui,
+                theme,
+                RowSpec::new(t("Show the original above"))
+                    .subtitle(t("The recognised text, smaller, over its translation")),
+                |ui| {
+                    widgets::toggle(ui, theme, &mut s.presentation.subtitle_original);
+                },
+            );
+            widgets::row(
+                ui,
+                theme,
+                RowSpec::new(t("See how it looks"))
+                    .subtitle(t("Stays up while you change the settings above"))
+                    .last(),
+                |ui| {
+                    if widgets::secondary_button(ui, theme, t("Show a sample")).clicked() {
+                        out.show_sample = true;
+                    }
+                },
+            );
+        });
+
+        widgets::section_caption(ui, theme, t("Separate window"));
+        widgets::list(ui, theme, |ui| {
+            widgets::row(
+                ui,
+                theme,
+                RowSpec::new(t("Keep on top of other windows"))
+                    .subtitle(t("The translation window stays in front"))
+                    .last(),
+                |ui| {
+                    widgets::toggle(ui, theme, &mut s.pin_result_window);
                 },
             );
         });
@@ -1385,14 +1591,20 @@ fn notice(ui: &mut egui::Ui, theme: &Theme, color: Color32, msg: &str) {
         .rounding(theme.group_rounding())
         .inner_margin(egui::Margin::symmetric(13.0, 10.0))
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
+            // A label in a row does not wrap of its own accord: a long notice
+            // ran off the right edge, and took the width of everything laid
+            // out after it along — controls beyond it ended up out of sight.
+            ui.horizontal_top(|ui| {
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(15.0), Sense::hover());
                 warning_glyph(ui.painter(), rect, color);
                 ui.add_space(2.0);
-                ui.label(
-                    egui::RichText::new(msg)
-                        .font(text::small())
-                        .color(if theme.dark { theme.text } else { color }),
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(msg)
+                            .font(text::small())
+                            .color(if theme.dark { theme.text } else { color }),
+                    )
+                    .wrap(),
                 );
             });
         });
@@ -1400,7 +1612,7 @@ fn notice(ui: &mut egui::Ui, theme: &Theme, color: Color32, msg: &str) {
 
 /// Exclamation in a triangle, drawn rather than relying on the ⚠ glyph.
 fn warning_glyph(p: &egui::Painter, rect: egui::Rect, color: Color32) {
-    let stroke = egui::Stroke::new(1.3, color);
+    let stroke = egui::Stroke::new(1.3_f32, color);
     let top = egui::pos2(rect.center().x, rect.min.y + 1.0);
     let left = egui::pos2(rect.min.x + 1.0, rect.max.y - 2.0);
     let right = egui::pos2(rect.max.x - 1.0, rect.max.y - 2.0);
@@ -1415,31 +1627,6 @@ fn warning_glyph(p: &egui::Painter, rect: egui::Rect, color: Color32) {
         stroke,
     );
     p.circle_filled(egui::pos2(rect.center().x, rect.max.y - 4.0), 0.9, color);
-}
-
-/// Frameless radio: a filled disc for the chosen row, a soft well for the rest.
-fn radio_dot(ui: &mut egui::Ui, theme: &Theme, selected: bool) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
-    let c = rect.center();
-    let p = ui.painter();
-    if selected {
-        p.circle_filled(c, 8.0, theme.accent);
-        p.circle_filled(c, 3.2, theme.on_accent);
-    } else {
-        p.circle_filled(
-            c,
-            8.0,
-            if resp.hovered() {
-                theme.control_fill_hover()
-            } else {
-                theme.control_fill()
-            },
-        );
-    }
-    if resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    resp
 }
 
 fn lang_picker(ui: &mut egui::Ui, id: &str, width: f32, lang: &mut Language, allow_auto: bool) {
@@ -1590,7 +1777,7 @@ fn history_row(
     // Chevron: down when the entry is open, right when it is not.
     let cx = rect.max.x - PAD - 4.0;
     let cy = rect.center().y;
-    let s = egui::Stroke::new(1.4, theme.text_dim);
+    let s = egui::Stroke::new(1.4_f32, theme.text_dim);
     if open {
         painter.line_segment([egui::pos2(cx - 5.0, cy - 2.0), egui::pos2(cx, cy + 3.0)], s);
         painter.line_segment([egui::pos2(cx, cy + 3.0), egui::pos2(cx + 5.0, cy - 2.0)], s);
@@ -1602,7 +1789,7 @@ fn history_row(
         painter.hline(
             (rect.min.x + PAD)..=rect.max.x,
             rect.max.y,
-            egui::Stroke::new(1.0, theme.separator),
+            egui::Stroke::new(1.0_f32, theme.separator),
         );
     }
     response
@@ -1686,7 +1873,7 @@ fn history_detail(ui: &mut egui::Ui, theme: &Theme, entry: &HistoryEntry, last: 
         ui.painter().hline(
             (ui.min_rect().min.x + 14.0)..=ui.min_rect().max.x,
             y,
-            egui::Stroke::new(1.0, theme.separator),
+            egui::Stroke::new(1.0_f32, theme.separator),
         );
     }
 }
@@ -1783,7 +1970,9 @@ fn capture_combination(ctx: &egui::Context) -> Option<Option<Hotkey>> {
                 mods |= MOD_SHIFT;
             }
             // A bare letter would swallow that key everywhere on the system.
-            if mods == MOD_NOREPEAT {
+            // The function row and the navigation block type nothing, so they
+            // may stand alone.
+            if mods == MOD_NOREPEAT && !bindable_alone(vk) {
                 continue;
             }
             return Some(Some(Hotkey {
@@ -1848,6 +2037,12 @@ fn egui_key_to_vk(key: egui::Key) -> Option<u32> {
         F11 => 0x7A,
         F12 => 0x7B,
         Space => 0x20,
+        PageUp => 0x21,
+        PageDown => 0x22,
+        End => 0x23,
+        Home => 0x24,
+        Insert => 0x2D,
+        Delete => 0x2E,
         Backtick => 0xC0,
         Minus => 0xBD,
         Equals => 0xBB,
@@ -1953,6 +2148,27 @@ mod tests {
         // Binding plain Enter would make it the hotkey everywhere.
         assert_eq!(egui_key_to_vk(egui::Key::Enter), None);
         assert_eq!(egui_key_to_vk(egui::Key::Tab), None);
+        // Esc cancels the recording; it is never the answer to it.
+        assert_eq!(egui_key_to_vk(egui::Key::Escape), None);
+    }
+
+    #[test]
+    fn the_navigation_block_can_be_recorded_and_may_stand_alone() {
+        for key in [
+            egui::Key::Insert,
+            egui::Key::Delete,
+            egui::Key::Home,
+            egui::Key::End,
+            egui::Key::PageUp,
+            egui::Key::PageDown,
+            egui::Key::F8,
+        ] {
+            let vk = egui_key_to_vk(key).expect("recordable");
+            assert!(bindable_alone(vk), "{key:?} should not need a modifier");
+            assert_ne!(vk_name(vk), "?", "{key:?} has no printable name");
+        }
+        // A letter still needs one.
+        assert!(!bindable_alone(egui_key_to_vk(egui::Key::T).unwrap()));
     }
 
     #[test]

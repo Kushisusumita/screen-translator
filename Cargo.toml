@@ -83,6 +83,8 @@ windows = { version = "0.58", features = [
     "Win32_System_LibraryLoader",
     "Win32_System_Registry",
     "Win32_System_Memory",
+    # Mapping font files instead of reading them whole.
+    "Win32_Storage_FileSystem",
     "Win32_System_Diagnostics_Debug",
     "Win32_Security",
     "Win32_Security_Cryptography",

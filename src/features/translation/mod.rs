@@ -4,4 +4,4 @@ pub mod ocr;
 pub mod pipeline;
 pub mod providers;
 
-pub use pipeline::{run as run_pipeline, PipelineParams, PipelineResult};
+pub use pipeline::{run as run_pipeline, CaptureKind, PipelineParams, PipelineResult, Progress};

@@ -134,7 +134,16 @@ fn index_of(lang: Lang) -> usize {
 /// `key` is the English text. An unknown key returns itself, so a string added
 /// to the code but not yet to the tables shows in English instead of breaking.
 pub fn t(key: &'static str) -> &'static str {
-    let table = tables::for_lang(current());
+    translate(current(), key)
+}
+
+/// The same lookup for a language named outright rather than the one in use.
+///
+/// The tests go through here. The language in use is one value for the whole
+/// process, and tests run side by side: one that switched it to check a table
+/// could change what another test's `t` returned between two of its lines.
+fn translate(lang: Lang, key: &'static str) -> &'static str {
+    let table = tables::for_lang(lang);
     match table.binary_search_by_key(&key, |(k, _)| k) {
         Ok(i) => table[i].1,
         Err(_) => key,
@@ -283,24 +292,25 @@ mod tests {
 
     #[test]
     fn an_unknown_key_falls_back_to_its_own_english() {
-        set(Lang::Ru);
-        assert_eq!(t("Not a key in any table"), "Not a key in any table");
-        set(Lang::En);
+        assert_eq!(
+            translate(Lang::Ru, "Not a key in any table"),
+            "Not a key in any table"
+        );
     }
 
     #[test]
     fn english_is_the_identity() {
-        set(Lang::En);
-        assert_eq!(t("Settings"), "Settings");
+        assert_eq!(translate(Lang::En, "Settings"), "Settings");
     }
 
     #[test]
     fn every_language_translates_a_key_it_has() {
-        set(Lang::Ru);
-        // Whatever the tables end up containing, this must not be the English.
-        if let Some((key, value)) = tables::for_lang(Lang::Ru).first() {
-            assert_eq!(t(key), *value);
+        for lang in Lang::ALL {
+            // Whatever the tables end up containing, a key that is in one
+            // comes back as that table's text for it.
+            if let Some((key, value)) = tables::for_lang(lang).first() {
+                assert_eq!(translate(lang, key), *value, "{}", lang.code());
+            }
         }
-        set(Lang::En);
     }
 }

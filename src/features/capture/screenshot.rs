@@ -16,9 +16,10 @@
 
 use std::io::Cursor;
 
-use image::{ImageBuffer, RgbImage};
+use image::RgbImage;
 use tracing::{debug, warn};
 
+use super::frame::Frame;
 use crate::shared::error::AppError;
 use crate::shared::i18n::t;
 
@@ -50,6 +51,10 @@ impl Bounds {
     }
     pub fn bottom(&self) -> i32 {
         self.y + self.h
+    }
+
+    pub fn contains(&self, x: i32, y: i32) -> bool {
+        x >= self.x && x < self.right() && y >= self.y && y < self.bottom()
     }
 
     /// Intersection, or `None` when the two do not overlap at all.
@@ -168,6 +173,81 @@ pub fn work_area() -> Bounds {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         desktop
+    }
+}
+
+/// One display: its whole frame, and the part of it a window may occupy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Monitor {
+    pub bounds: Bounds,
+    /// `bounds` minus the taskbar, the menu bar and the Dock.
+    pub work: Bounds,
+}
+
+/// The display that holds most of `area`.
+///
+/// A translation belongs on the screen the text was on. With two monitors,
+/// "the bottom of the desktop" is the bottom of whichever one hangs lowest —
+/// which is not where a subtitle for the other one should go.
+pub fn monitor_for(area: Bounds) -> Monitor {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Graphics::Gdi::{
+            GetMonitorInfoW, MonitorFromRect, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        };
+
+        let rect = RECT {
+            left: area.x,
+            top: area.y,
+            right: area.right(),
+            bottom: area.bottom(),
+        };
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        let found = unsafe {
+            let handle = MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST);
+            GetMonitorInfoW(handle, &mut info).as_bool()
+        };
+        if found {
+            let to_bounds = |r: RECT| Bounds {
+                x: r.left,
+                y: r.top,
+                w: r.right - r.left,
+                h: r.bottom - r.top,
+            };
+            let bounds = to_bounds(info.rcMonitor);
+            let work = to_bounds(info.rcWork);
+            if bounds.w > 0 && bounds.h > 0 && work.w > 0 && work.h > 0 {
+                return Monitor { bounds, work };
+            }
+        }
+    }
+
+    // Everywhere else, and when the platform would not say: the desktop as one
+    // screen. Right on any single-monitor machine, which is most of them.
+    let _ = area;
+    Monitor {
+        bounds: virtual_desktop(),
+        work: work_area(),
+    }
+}
+
+/// Where the mouse is, in desktop physical pixels.
+pub fn cursor_position() -> Option<(i32, i32)> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+        let mut point = POINT::default();
+        unsafe { GetCursorPos(&mut point) }.ok()?;
+        Some((point.x, point.y))
+    }
+    #[cfg(not(windows))]
+    {
+        None
     }
 }
 
@@ -590,58 +670,90 @@ mod portable {
 
 // ── Public capture API ───────────────────────────────────────────────────────
 
-/// The whole virtual desktop as an egui image, for the frozen backdrop.
-pub fn capture_desktop_image() -> Result<(egui::ColorImage, Bounds), AppError> {
-    let area = virtual_desktop();
-    let raw = grab(area)?;
-
-    let pixels: Vec<egui::Color32> = raw
-        .bgra
-        .chunks_exact(4)
-        .map(|c| egui::Color32::from_rgb(c[2], c[1], c[0]))
-        .collect();
-
-    Ok((
-        egui::ColorImage {
-            size: [raw.w as usize, raw.h as usize],
-            pixels,
-        },
-        area,
-    ))
+/// Every monitor, as one frame — what the overlay freezes.
+pub fn capture_desktop() -> Result<Frame, AppError> {
+    capture_frame(virtual_desktop())
 }
 
-/// Captures `area` and encodes it for OCR.
-pub fn capture_region_for_ocr(area: Bounds) -> Result<Vec<u8>, AppError> {
+/// Grabs `area` of the live screen.
+pub fn capture_frame(area: Bounds) -> Result<Frame, AppError> {
     let Some(area) = area.clamp_to(virtual_desktop()) else {
         return Err(AppError::Other(
             t("The selected area is entirely off screen").into(),
         ));
     };
-    if area.w < MIN_SIDE || area.h < MIN_SIDE {
-        return Err(AppError::Other(
-            t("The area is too small: {width}×{height} (the minimum is {min}×{min})")
-                .replace("{width}", &area.w.to_string())
-                .replace("{height}", &area.h.to_string())
-                .replace("{min}", &MIN_SIDE.to_string()),
-        ));
-    }
-
     let raw = grab(area)?;
+    debug_assert_eq!((raw.w, raw.h), (area.w, area.h));
+    Ok(Frame::from_bgra(area, raw.bgra))
+}
 
-    let mut rgb = Vec::with_capacity((raw.w as usize) * (raw.h as usize) * 3);
-    for c in raw.bgra.chunks_exact(4) {
-        rgb.push(c[2]);
-        rgb.push(c[1]);
-        rgb.push(c[0]);
+/// Says why a selection cannot be recognised, or `None` when it can.
+pub fn too_small(area: Bounds) -> Option<AppError> {
+    if area.w >= MIN_SIDE && area.h >= MIN_SIDE {
+        return None;
     }
-
-    let img: RgbImage = ImageBuffer::from_raw(raw.w as u32, raw.h as u32, rgb)
-        .ok_or_else(|| AppError::Other(t("Could not assemble the image").into()))?;
-
-    encode_for_ocr(img)
+    Some(AppError::Other(
+        t("The area is too small: {width}×{height} (the minimum is {min}×{min})")
+            .replace("{width}", &area.w.to_string())
+            .replace("{height}", &area.h.to_string())
+            .replace("{min}", &MIN_SIDE.to_string()),
+    ))
 }
 
 pub const MIN_SIDE: i32 = 8;
+
+/// A capture ready to be sent for recognition.
+pub struct Encoded {
+    pub jpeg: Vec<u8>,
+    /// How much the image was enlarged. Whatever comes back in the image's
+    /// coordinates is divided by this to land on the capture again.
+    pub scale: u32,
+}
+
+/// Encodes a frame for a vision model.
+///
+/// The opposite trade to OCR: a recogniser wants small text enlarged, while a
+/// model is billed by the pixel and stops gaining anything past a megapixel or
+/// two. So nothing is scaled up, and a large capture is scaled down to a long
+/// side the model reads comfortably.
+pub fn encode_frame_for_vision(frame: &Frame) -> Result<Vec<u8>, AppError> {
+    use image::codecs::jpeg::JpegEncoder;
+    use image::imageops::FilterType;
+
+    const LONG_SIDE: u32 = 1568;
+
+    let img = frame
+        .to_rgb_image()
+        .ok_or_else(|| AppError::Other(t("Could not assemble the image").into()))?;
+    let (w, h) = img.dimensions();
+    let longest = w.max(h);
+    let img = if longest > LONG_SIDE {
+        let ratio = LONG_SIDE as f32 / longest as f32;
+        image::imageops::resize(
+            &img,
+            ((w as f32 * ratio).round() as u32).max(1),
+            ((h as f32 * ratio).round() as u32).max(1),
+            FilterType::Lanczos3,
+        )
+    } else {
+        img
+    };
+
+    let mut out = Vec::new();
+    JpegEncoder::new_with_quality(&mut Cursor::new(&mut out), 88)
+        .encode_image(&img)
+        .map_err(AppError::Image)?;
+    Ok(out)
+}
+
+/// Encodes a frame for OCR. Does real work — a resample and a JPEG pass — so
+/// it belongs on a worker thread, not in a frame of the UI.
+pub fn encode_frame(frame: &Frame) -> Result<Encoded, AppError> {
+    let img = frame
+        .to_rgb_image()
+        .ok_or_else(|| AppError::Other(t("Could not assemble the image").into()))?;
+    encode_for_ocr(img)
+}
 
 /// Upscales small captures before encoding.
 ///
@@ -650,7 +762,7 @@ pub const MIN_SIDE: i32 = 8;
 /// up costs a millisecond and turns "no text found" into a clean read. Quality
 /// is raised to 92 for the same reason: JPEG ringing around small glyphs is
 /// exactly the artefact that confuses a recogniser.
-fn encode_for_ocr(img: RgbImage) -> Result<Vec<u8>, AppError> {
+fn encode_for_ocr(img: RgbImage) -> Result<Encoded, AppError> {
     use image::codecs::jpeg::JpegEncoder;
     use image::imageops::FilterType;
 
@@ -669,7 +781,7 @@ fn encode_for_ocr(img: RgbImage) -> Result<Vec<u8>, AppError> {
     JpegEncoder::new_with_quality(&mut cursor, 92)
         .encode_image(&img)
         .map_err(AppError::Image)?;
-    Ok(out)
+    Ok(Encoded { jpeg: out, scale })
 }
 
 /// Small captures get scaled up; large ones are left alone so a full-screen
@@ -708,10 +820,9 @@ mod live_tests {
         let desktop = virtual_desktop();
         assert!(desktop.w > 0 && desktop.h > 0, "no usable desktop bounds");
 
-        let (image, area) = capture_desktop_image().expect("desktop capture");
-        assert_eq!(area, desktop);
-        assert_eq!(image.size, [desktop.w as usize, desktop.h as usize]);
-        assert_eq!(image.pixels.len(), (desktop.w * desktop.h) as usize);
+        let frame = capture_desktop().expect("desktop capture");
+        assert_eq!(frame.bounds, desktop);
+        assert_eq!(frame.rgba().len(), (desktop.w * desktop.h * 4) as usize);
     }
 
     #[test]
@@ -726,7 +837,8 @@ mod live_tests {
         };
         // The OCR path re-encodes as JPEG, so a non-empty result means the
         // whole chain — stitch, convert, encode — held together.
-        let jpeg = capture_region_for_ocr(region).expect("region capture");
+        let frame = capture_frame(region).expect("region capture");
+        let jpeg = encode_frame(&frame).expect("encode").jpeg;
         assert!(jpeg.len() > 1024, "suspiciously small JPEG: {}", jpeg.len());
         assert_eq!(&jpeg[..2], &[0xFF, 0xD8], "not a JPEG");
     }

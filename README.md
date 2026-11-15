@@ -25,13 +25,21 @@
 ## 🎯 What it does
 
 Press a global hotkey, point at some text — a region you drag, a window, or the
-whole screen — and the translation appears next to it. Click anywhere or press
-`Esc` to dismiss.
+whole screen — and the translation takes the place of the original: same spot,
+same size, same colours, on a plate that continues the panel the text was on.
+Click anywhere or press `Esc` and it is gone.
 
-> 🚫 No browser extension. 📋 No copy-paste. 🎮 Works in fullscreen apps and games.
+> 🚫 No browser extension. 📋 No copy-paste. 🎮 Made to be used mid-game.
 
-Four translation engines — AI, DeepL, Yandex, Google — are tried in the order you
-set, and the first one that answers wins.
+- **Over the original** — a dialogue box stays a dialogue box, only readable.
+  Nothing else on the screen is covered, and the game keeps the keyboard.
+- **Subtitles** — or have the translation as a line at the bottom of the screen
+  instead, the way film subtitles sit, and leave the original untouched.
+- **Watch an area** — select the dialogue box once and every new line is
+  translated as it appears, with no further key presses.
+- **Four engines** — AI, DeepL, Yandex, Google — tried in the order you set; the
+  first one that answers wins. An AI model that can see can be handed the
+  screenshot itself, which copes with stylised type a recogniser gives up on.
 
 ---
 
@@ -54,10 +62,10 @@ cargo build --release
 
 1. 🔔 The app starts silently in the **system tray** (Windows/Linux) or the
    **menu bar** (macOS).
-2. ⌨️ Press **`Ctrl+T`** anywhere on screen.
+2. ⌨️ Press **`Alt+Q`** anywhere on screen.
 3. ❄️ The screen **freezes and dims**. Drag a rectangle around the text — or
    press `Tab` to switch to window or full-screen mode.
-4. 🖱️ Release the mouse. The translation appears next to the selection.
+4. 🖱️ Release the mouse. The translation appears where the text was.
 5. ✖️ **Click away** or press **`Esc`** to close it.
 
 ---
@@ -67,13 +75,28 @@ cargo build --release
 Right-click the tray icon — left-click on macOS — for the capture modes,
 **Settings** and **Exit**.
 
-### Capture keys
+### Keys
+
+Global — they work in any program, and every one can be changed or switched off
+in *Settings → Keyboard shortcuts*:
 
 | Key | Does |
 |---|---|
-| `Ctrl+T` | 🖼️ Capture a region you drag |
-| `Ctrl+Shift+W` | 🪟 Capture a window you point at |
-| `Ctrl+Shift+S` | 🖥️ Capture the whole screen |
+| `Alt+Q` | 🖼️ Translate a region you drag |
+| `Alt+Shift+W` | 🪟 Translate a window you point at |
+| `Alt+Shift+F` | 🖥️ Translate the whole screen the pointer is on |
+| `Alt+Shift+R` | 🔁 Translate the last area again, without selecting it |
+| `Alt+Shift+Q` | 👁️ Watch an area: translate it again whenever its text changes |
+| `Esc` | ✖️ Take the translation off the screen (only while one is showing) |
+
+`F1`–`F12`, `Insert`, `Delete`, `Home`, `End`, `Page Up` and `Page Down` can be
+bound on their own, without `Ctrl`, `Alt` or `Shift` — one key is all a hand on
+the mouse can spare.
+
+While selecting:
+
+| Key | Does |
+|---|---|
 | `Tab` | 🔄 Switch capture mode without starting over |
 | `Space` (held) | ✋ Move the whole selection instead of resizing it |
 | **Right click** | 🧹 Throw the selection away and start a new one |
@@ -83,17 +106,36 @@ A crosshair follows the pointer with a live **X / Y readout in captured
 pixels** — the same unit as the size badge and the image that comes back, so
 what you read is what you get.
 
+### In a game
+
+- The translation never takes the focus: the game does not pause, mute or
+  minimise because a window appeared over it.
+- **Repeat** (`Alt+Shift+R`) is the one to keep under a finger — dialogue
+  comes up in the same box every time, so select it once and repeat from then on.
+- **Watch** goes a step further and needs no key at all. It reads the area
+  through its own translation, so the two do not get in each other's way; press
+  the same shortcut again to stop.
+- Text laid straight over the scene, with no panel behind it, is given a plain
+  dark caption — there is no surface to continue there.
+- If nothing shows up over a game in *exclusive* full-screen, switch the game to
+  borderless or windowed full-screen: no desktop window can be drawn over a
+  display a game has taken for itself.
+
 ### Handy settings
 
 | Setting | Where | Default |
 |---|---|---|
-| 🪟 Result view — popup · over the original · window | *Appearance* | **Over the original** |
-| 📌 Keep the result window on top | *Appearance → Result window* | **On** |
-| 🫥 Close the result when you click away | *Appearance → Result window* | **On** |
+| 🪟 How the translation is shown — over the original · subtitles · card · window | *Appearance* | **Over the original** |
+| ⏱️ Hide it by itself — never · once read · after a set time | *Appearance* | **Never** |
+| 🫥 Hide it when you click somewhere else | *Appearance* | **On** |
+| 👻 Let clicks pass through it to the game | *Appearance* | Off |
+| 🎬 Subtitle size, position and opacity, with a sample to try | *Appearance → Subtitles* | — |
+| 👁️ How often a watched area is checked | *General → Watching an area* | **1 s** |
 | 🔔 Notify about new versions | *About → Updates* | **On** |
 | 📋 Copy the translation to the clipboard | *General* | Off |
 | 🔇 Hide the tray icon (hotkeys keep working) | *General* | Off |
 | 🤖 AI endpoint, model and token | *Engine → AI translator* | — |
+| 🖼️ Let the AI model read the screenshot itself | *Engine → AI translator* | Off |
 
 **Test connection** on the engine page sends one short translation and reports
 what came back, so a wrong key or model shows up immediately instead of at the
@@ -102,12 +144,18 @@ next capture.
 ### Command line
 
 ```bash
-screen-translator --settings          # open the settings window on launch
-screen-translator --settings engine   # open it straight on a given page
-screen-translator --help              # list the options
+screen-translator --settings              # open the settings window on launch
+screen-translator --settings engine       # open it straight on a given page
+screen-translator --region 100,200,800,160  # translate this rectangle right away
+screen-translator --help                  # list the options
 ```
 
-Pages: `general`, `keys`, `languages`, `engine`, `appearance`, `logs`, `about`.
+Pages: `general`, `keys`, `languages`, `engine`, `appearance`, `history`, `logs`,
+`about`. `--region` takes `left,top,width,height` in desktop pixels — for a
+launcher button, a macro key, or a controller mapping.
+
+Set `SAKURA_CONFIG_DIR` to keep settings and logs in a folder of your choosing
+instead of the system's usual place: a portable copy, or a second profile.
 
 > 🌏 The interface follows the system language, with fourteen to choose from in
 > *General → Interface language*. The English section names above are what the

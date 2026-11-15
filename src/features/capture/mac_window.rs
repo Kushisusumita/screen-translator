@@ -28,14 +28,6 @@ use objc2_app_kit::{
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use tracing::info;
 
-/// Title the overlay viewport is created with, and the only way to tell its
-/// window apart from the settings and result windows.
-pub const OVERLAY_TITLE: &str = "Sakura capture overlay";
-
-/// The "translation over the original" view covers the desktop in exactly the
-/// same way, so it needs exactly the same treatment.
-pub const INLINE_TITLE: &str = "Sakura translation overlay";
-
 /// Shown on every Space, and left alone by Mission Control.
 const FOLLOWS_THE_USER: NSWindowCollectionBehavior =
     NSWindowCollectionBehavior::CanJoinAllSpaces.union(NSWindowCollectionBehavior::Stationary);
@@ -146,6 +138,36 @@ pub fn present_overlay(title: &str) {
         }
 
         raise(&window, desktop);
+    }
+}
+
+/// Keeps a small window — a translation, a subtitle — in front of whatever the
+/// user is looking at, a full-screen app included, without resizing it and
+/// without taking the keyboard.
+///
+/// The same levers as [`present_overlay`], minus the two that make that one an
+/// overlay: the frame is left alone, and the window is never made key.
+pub fn float_over(title: &str) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+
+    let behaviour = FOLLOWS_THE_USER
+        | NSWindowCollectionBehavior::FullScreenAuxiliary
+        | NSWindowCollectionBehavior::IgnoresCycle;
+
+    let app = NSApplication::sharedApplication(mtm);
+    for window in app.windows().iter() {
+        if window.title().to_string() != title {
+            continue;
+        }
+        if window.level() != NSScreenSaverWindowLevel {
+            window.setLevel(NSScreenSaverWindowLevel);
+        }
+        if window.collectionBehavior() != behaviour {
+            window.setCollectionBehavior(behaviour);
+            window.orderFrontRegardless();
+        }
     }
 }
 

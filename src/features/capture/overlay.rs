@@ -1,13 +1,21 @@
 //! The capture overlay: frozen desktop, mode switcher, selection marquee.
 
-use egui::{Align2, Color32, ColorImage, Pos2, Rect, Sense, Stroke, TextureHandle, Vec2};
+use std::time::Instant;
 
-use super::screenshot::Bounds;
+use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, TextureHandle, Vec2};
+
+use super::frame::Frame;
+use super::screenshot::{cursor_position, monitor_for, Bounds};
 use super::window_pick::{hit_test, WindowInfo};
 use crate::entities::settings::CaptureMode;
 use crate::shared::i18n::t;
-use crate::ui::theme::text;
+use crate::ui::theme::{text, wash};
 use crate::ui::{icons, widgets, Theme};
+
+/// Title of the overlay's window. Never drawn — the window has no chrome — but
+/// it is how the platform layer picks this window out to place it over the
+/// whole desktop, the menu bar and the Dock included.
+pub const TITLE: &str = "Sakura capture overlay";
 
 /// Converts between egui's local points and desktop physical pixels.
 ///
@@ -84,12 +92,30 @@ impl Geometry {
     }
 }
 
+/// What the selection is for. The overlay looks the same either way; what it
+/// says, and what happens when the mouse is released, differ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Purpose {
+    /// Translate what is selected, once.
+    Translate,
+    /// Keep translating the selected area as its text changes.
+    Watch,
+}
+
 pub struct OverlayState {
     pub mode: CaptureMode,
+    pub purpose: Purpose,
     pub show_mode_hud: bool,
     pub geometry: Geometry,
-    pub background: Option<ColorImage>,
+    /// The desktop as it was when the shortcut was pressed. Everything the
+    /// user sees and selects here is this one image, and it is the image the
+    /// text is later read from.
+    pub frame: Option<Frame>,
     texture: Option<TextureHandle>,
+    /// Frames drawn so far. The window is created hidden and shown on the
+    /// second one, once it has been told not to animate in.
+    pub frames: u32,
+    opened: Instant,
 
     drag_start: Option<Pos2>,
     drag_current: Option<Pos2>,
@@ -98,6 +124,8 @@ pub struct OverlayState {
 
     pub windows: Vec<WindowInfo>,
     hovered_window: Option<Rect>,
+    /// Full-screen mode: the display under the pointer.
+    hovered_screen: Option<Bounds>,
 
     /// Result in desktop physical pixels.
     pub completed: Option<Bounds>,
@@ -105,25 +133,40 @@ pub struct OverlayState {
 }
 
 impl OverlayState {
-    pub fn new(geometry: Geometry, mode: CaptureMode, show_mode_hud: bool) -> Self {
+    pub fn new(
+        geometry: Geometry,
+        mode: CaptureMode,
+        purpose: Purpose,
+        show_mode_hud: bool,
+    ) -> Self {
         Self {
-            mode,
-            show_mode_hud,
+            // Watching is about one area; a window or a screen is not
+            // something whose "text changes" in a way worth following.
+            mode: if purpose == Purpose::Watch {
+                CaptureMode::Region
+            } else {
+                mode
+            },
+            purpose,
+            show_mode_hud: show_mode_hud && purpose == Purpose::Translate,
             geometry,
-            background: None,
+            frame: None,
             texture: None,
+            frames: 0,
+            opened: Instant::now(),
             drag_start: None,
             drag_current: None,
             move_anchor: None,
             windows: Vec::new(),
             hovered_window: None,
+            hovered_screen: None,
             completed: None,
             cancelled: false,
         }
     }
 
-    pub fn with_background(mut self, img: ColorImage) -> Self {
-        self.background = Some(img);
+    pub fn with_frame(mut self, frame: Option<Frame>) -> Self {
+        self.frame = frame;
         self
     }
 
@@ -138,6 +181,20 @@ impl OverlayState {
             _ => None,
         }
     }
+
+    fn clear_selection(&mut self) {
+        self.drag_start = None;
+        self.drag_current = None;
+        self.move_anchor = None;
+    }
+
+    /// How far the dimming has faded in, 0–1. The window itself appears at
+    /// once and shows exactly what was on screen, so the only thing that
+    /// visibly happens is the dimming easing in over the top.
+    fn dim(&self) -> f32 {
+        let t = (self.opened.elapsed().as_secs_f32() / 0.14).min(1.0);
+        t * t * (3.0 - 2.0 * t)
+    }
 }
 
 pub fn render(ctx: &egui::Context, theme: &Theme, state: &mut OverlayState) {
@@ -146,14 +203,16 @@ pub fn render(ctx: &egui::Context, theme: &Theme, state: &mut OverlayState) {
     }
     if ctx.input(|i| i.key_pressed(egui::Key::Tab)) && state.show_mode_hud {
         state.mode = state.mode.next();
-        state.drag_start = None;
-        state.drag_current = None;
+        state.clear_selection();
     }
 
     if state.texture.is_none() {
-        if let Some(img) = state.background.take() {
-            state.texture =
-                Some(ctx.load_texture("overlay_bg", img, egui::TextureOptions::NEAREST));
+        if let Some(frame) = &state.frame {
+            state.texture = Some(ctx.load_texture(
+                "overlay_bg",
+                frame.to_color_image(),
+                egui::TextureOptions::NEAREST,
+            ));
         }
     }
 
@@ -162,21 +221,27 @@ pub fn render(ctx: &egui::Context, theme: &Theme, state: &mut OverlayState) {
         .show(ctx, |ui| {
             let screen = ui.max_rect();
             let origin = screen.min;
+
+            // On Windows the window is put on exactly the desktop's pixels, so
+            // the ratio of the two sizes is the true scale of *this* window —
+            // which is not necessarily the scale of the host window the
+            // geometry was first built from, on a desktop with mixed scaling.
+            if cfg!(windows) && screen.width() > 1.0 {
+                state.geometry.points_per_pixel =
+                    state.geometry.desktop.w as f32 / screen.width();
+            }
+
             let response = ui.allocate_rect(screen, Sense::click_and_drag());
 
             match state.mode {
-                CaptureMode::Region => handle_region_drag(&response, state, ctx),
+                CaptureMode::Region => handle_region_drag(&response, state, ctx, origin),
                 CaptureMode::Window => handle_window_pick(&response, state, origin),
-                CaptureMode::FullScreen => {
-                    if response.clicked() {
-                        state.completed = Some(state.geometry.desktop);
-                    }
-                }
+                CaptureMode::FullScreen => handle_screen_pick(&response, state, origin),
             }
 
             // A pointing arrow over a full-screen scrim says nothing about what
-            // is about to happen; the crosshair is what every capture tool on
-            // both platforms uses, and it aims to the pixel.
+            // is about to happen; the crosshair is what every capture tool
+            // uses, and it aims to the pixel.
             ctx.set_cursor_icon(match state.mode {
                 CaptureMode::Region => egui::CursorIcon::Crosshair,
                 CaptureMode::Window | CaptureMode::FullScreen => egui::CursorIcon::PointingHand,
@@ -190,24 +255,30 @@ pub fn render(ctx: &egui::Context, theme: &Theme, state: &mut OverlayState) {
         paint_top_bar(ctx, theme, state);
         paint_hint(ctx, theme, state);
     }
+    if state.dim() < 1.0 {
+        ctx.request_repaint();
+    }
+    state.frames = state.frames.saturating_add(1);
 }
 
-fn handle_region_drag(response: &egui::Response, state: &mut OverlayState, ctx: &egui::Context) {
+fn handle_region_drag(
+    response: &egui::Response,
+    state: &mut OverlayState,
+    ctx: &egui::Context,
+    origin: Pos2,
+) {
     // Right click throws the marquee away and leaves the overlay up, so the
     // next drag starts from nothing. Esc is the other thing entirely — it
     // abandons the capture — and using it to redraw a rectangle means pressing
     // the hotkey again and waiting for another screen grab.
     if response.secondary_clicked() {
-        state.drag_start = None;
-        state.drag_current = None;
-        state.move_anchor = None;
+        state.clear_selection();
         return;
     }
 
     let space_held = ctx.input(|i| i.key_down(egui::Key::Space));
 
-    // Space turns the drag into a move of the whole marquee — the design's
-    // "Space — переместить выделение".
+    // Space turns the drag into a move of the whole marquee.
     if space_held {
         if let (Some(pos), Some(sel)) = (response.interact_pointer_pos(), state.selection()) {
             if state.move_anchor.is_none() && response.dragged() {
@@ -238,13 +309,16 @@ fn handle_region_drag(response: &egui::Response, state: &mut OverlayState, ctx: 
     }
     if response.drag_stopped() {
         if let Some(rect) = state.selection() {
-            let bounds = state.geometry.rect_to_bounds(rect, Pos2::ZERO);
-            // Ignore a stray click that produced a few-pixel rectangle.
-            if bounds.w >= super::screenshot::MIN_SIDE && bounds.h >= super::screenshot::MIN_SIDE {
-                state.completed = Some(bounds);
-            } else {
-                state.drag_start = None;
-                state.drag_current = None;
+            let bounds = state
+                .geometry
+                .rect_to_bounds(rect, origin)
+                .clamp_to(state.geometry.desktop);
+            match bounds {
+                // Ignore a stray click that produced a few-pixel rectangle.
+                Some(b) if b.w >= super::screenshot::MIN_SIDE && b.h >= super::screenshot::MIN_SIDE => {
+                    state.completed = Some(b);
+                }
+                _ => state.clear_selection(),
             }
         }
     }
@@ -275,6 +349,34 @@ fn handle_window_pick(response: &egui::Response, state: &mut OverlayState, origi
     }
 }
 
+/// "The whole screen" is the display the pointer is on — not every monitor at
+/// once, which on a two-screen desk is twice the text anyone asked for.
+fn handle_screen_pick(response: &egui::Response, state: &mut OverlayState, origin: Pos2) {
+    let pos = response
+        .hover_pos()
+        .or_else(|| response.interact_pointer_pos());
+    let screen = match pos {
+        Some(pos) => {
+            let (px, py) = state.geometry.to_physical(pos, origin);
+            monitor_for(Bounds {
+                x: px,
+                y: py,
+                w: 1,
+                h: 1,
+            })
+            .bounds
+        }
+        None => state.geometry.desktop,
+    };
+    let screen = screen
+        .clamp_to(state.geometry.desktop)
+        .unwrap_or(state.geometry.desktop);
+    state.hovered_screen = Some(screen);
+    if response.clicked() {
+        state.completed = Some(screen);
+    }
+}
+
 fn paint(ui: &mut egui::Ui, theme: &Theme, state: &OverlayState, screen: Rect, origin: Pos2) {
     let painter = ui.painter();
 
@@ -286,17 +388,22 @@ fn paint(ui: &mut egui::Ui, theme: &Theme, state: &OverlayState, screen: Rect, o
             Color32::WHITE,
         );
     }
-    painter.rect_filled(screen, 0.0, theme.scrim);
+    painter.rect_filled(screen, 0.0, theme.scrim.gamma_multiply(state.dim()));
 
     let highlight = match state.mode {
         CaptureMode::Region => state.selection(),
         CaptureMode::Window => state.hovered_window,
-        CaptureMode::FullScreen => Some(screen),
+        CaptureMode::FullScreen => state
+            .hovered_screen
+            .map(|b| state.geometry.bounds_to_rect(b, origin)),
     };
 
-    let Some(sel) = highlight else { return };
-    let sel = sel.intersect(screen);
+    let Some(sel) = highlight.map(|r| r.intersect(screen)) else {
+        paint_crosshair(ui, state, screen);
+        return;
+    };
     if sel.width() < 1.0 || sel.height() < 1.0 {
+        paint_crosshair(ui, state, screen);
         return;
     }
 
@@ -316,28 +423,17 @@ fn paint(ui: &mut egui::Ui, theme: &Theme, state: &OverlayState, screen: Rect, o
         painter.image(tex.id(), sel, uv, Color32::WHITE);
     }
 
-    painter.rect_stroke(sel, 0.0, Stroke::new(1.5, Color32::WHITE));
+    // A dark hairline outside the light one: the frame has to read on a white
+    // page and on a night scene alike.
+    painter.rect_stroke(
+        sel.expand(1.0),
+        0.0,
+        Stroke::new(1.0_f32, Color32::from_black_alpha(110)),
+    );
+    painter.rect_stroke(sel, 0.0, Stroke::new(1.0_f32, Color32::from_white_alpha(235)));
 
-    // Eight handles: four corners plus the edge midpoints, exactly as drawn in
-    // the design.
     if state.mode == CaptureMode::Region {
-        let h = 7.0;
-        for p in [
-            sel.left_top(),
-            sel.right_top(),
-            sel.left_bottom(),
-            sel.right_bottom(),
-            egui::pos2(sel.center().x, sel.min.y),
-            egui::pos2(sel.center().x, sel.max.y),
-            egui::pos2(sel.min.x, sel.center().y),
-            egui::pos2(sel.max.x, sel.center().y),
-        ] {
-            painter.rect_filled(
-                Rect::from_center_size(p, Vec2::splat(h)),
-                1.0,
-                Color32::WHITE,
-            );
-        }
+        paint_corners(painter, sel, theme.sakura_soft);
     }
 
     // Size badge, in real captured pixels rather than layout points — the two
@@ -350,6 +446,7 @@ fn paint(ui: &mut egui::Ui, theme: &Theme, state: &OverlayState, screen: Rect, o
             .iter()
             .find(|w| w.bounds == bounds)
             .map(|w| crate::shared::logging::clip(&w.title, 60).to_string())
+            .filter(|title| !title.is_empty())
             .unwrap_or_else(|| format!("{} × {}", bounds.w, bounds.h)),
         _ => format!("{} × {}", bounds.w, bounds.h),
     };
@@ -358,13 +455,58 @@ fn paint(ui: &mut egui::Ui, theme: &Theme, state: &OverlayState, screen: Rect, o
     let galley = painter.layout_no_wrap(label, font, Color32::WHITE);
     let pad = Vec2::new(7.0, 3.0);
     let badge_size = galley.size() + pad * 2.0;
+    // Above the selection when there is room; inside its top edge when the
+    // selection starts at the top of the screen.
+    let above = sel.min.y - badge_size.y - 6.0;
     let badge_pos = egui::pos2(
         (sel.max.x - badge_size.x).max(screen.min.x + 4.0),
-        (sel.min.y - badge_size.y - 6.0).max(screen.min.y + 4.0),
+        if above >= screen.min.y + 4.0 {
+            above
+        } else {
+            sel.min.y + 6.0
+        },
     );
     let badge = Rect::from_min_size(badge_pos, badge_size);
-    painter.rect_filled(badge, 4.0, Color32::from_rgba_unmultiplied(0, 0, 0, 140));
+    painter.rect_filled(badge, 4.0, wash(0, 0, 0, 150));
     painter.galley(badge.min + pad, galley, Color32::WHITE);
+}
+
+/// Brackets at the four corners of the marquee.
+///
+/// The selection used to carry eight square handles — the vocabulary of a
+/// rectangle you can resize by its edges, which this one is not. Brackets mark
+/// the corners just as clearly and promise nothing.
+fn paint_corners(painter: &egui::Painter, sel: Rect, colour: Color32) {
+    let arm = (sel.width().min(sel.height()) * 0.25).clamp(4.0, 14.0);
+    let stroke = Stroke::new(2.5_f32, colour);
+    for (corner, dx, dy) in [
+        (sel.left_top(), 1.0, 1.0),
+        (sel.right_top(), -1.0, 1.0),
+        (sel.left_bottom(), 1.0, -1.0),
+        (sel.right_bottom(), -1.0, -1.0),
+    ] {
+        painter.line_segment([corner, corner + Vec2::new(arm * dx, 0.0)], stroke);
+        painter.line_segment([corner, corner + Vec2::new(0.0, arm * dy)], stroke);
+    }
+}
+
+/// Hairlines through the pointer, from edge to edge, while nothing is selected
+/// yet: they show where a drag would start, and make it possible to line the
+/// first corner up with the edge of a text box before committing to it.
+fn paint_crosshair(ui: &egui::Ui, state: &OverlayState, screen: Rect) {
+    if state.mode != CaptureMode::Region {
+        return;
+    }
+    let Some(pointer) = ui.ctx().pointer_latest_pos() else {
+        return;
+    };
+    if !screen.contains(pointer) {
+        return;
+    }
+    let stroke = Stroke::new(1.0_f32, Color32::from_white_alpha(70));
+    let painter = ui.painter();
+    painter.hline(screen.x_range(), pointer.y.round() + 0.5, stroke);
+    painter.vline(pointer.x.round() + 0.5, screen.y_range(), stroke);
 }
 
 /// The coordinate box that follows the crosshair, the way macOS's own capture
@@ -395,7 +537,7 @@ fn paint_cursor_readout(ui: &egui::Ui, state: &OverlayState, screen: Rect, origi
 
     let pad = Vec2::new(7.0, 4.0);
     let box_rect = readout_rect(pointer, galley.size() + pad * 2.0, screen);
-    painter.rect_filled(box_rect, 4.0, Color32::from_rgba_unmultiplied(0, 0, 0, 170));
+    painter.rect_filled(box_rect, 4.0, wash(0, 0, 0, 170));
     painter.galley(box_rect.min + pad, galley, Color32::WHITE);
 }
 
@@ -459,25 +601,30 @@ fn paint_top_bar(ctx: &egui::Context, theme: &Theme, state: &mut OverlayState) {
         .position(|m| *m == state.mode)
         .unwrap_or(0);
 
-    let screen = ctx.screen_rect();
+    // On the display the pointer is on: with two monitors the middle of the
+    // desktop is the seam between them.
+    let screen = pointer_screen(ctx, state);
     egui::Area::new(egui::Id::new("capture_top_bar"))
         .order(egui::Order::Foreground)
         .fixed_pos(egui::pos2(screen.center().x, screen.min.y + 34.0))
         .pivot(Align2::CENTER_TOP)
         .show(ctx, |ui| {
+            ui.set_opacity(state.dim());
             ui.spacing_mut().item_spacing.x = 8.0;
             ui.horizontal(|ui| {
                 if state.show_mode_hud {
                     if let Some(i) = widgets::segmented(ui, theme, &items, selected) {
                         state.mode = CaptureMode::all()[i];
-                        state.drag_start = None;
-                        state.drag_current = None;
+                        state.clear_selection();
                     }
                     ui.label(
                         egui::RichText::new("Tab")
                             .font(text::caption())
-                            .color(Color32::from_rgba_unmultiplied(255, 255, 255, 130)),
+                            .color(wash(255, 255, 255, 130)),
                     );
+                }
+                if state.purpose == Purpose::Watch {
+                    widgets::hint_pill(ui, theme, t("Select the area to keep translating"));
                 }
                 if widgets::overlay_button(ui, theme, icons::close, t("Esc — cancel")).clicked() {
                     state.cancelled = true;
@@ -487,14 +634,11 @@ fn paint_top_bar(ctx: &egui::Context, theme: &Theme, state: &mut OverlayState) {
 }
 
 fn paint_hint(ctx: &egui::Context, theme: &Theme, state: &OverlayState) {
-    // Each platform names the space bar and the copy shortcut its own way, and
-    // the design spells both out differently in the two rounds.
     let hint = match state.mode {
         CaptureMode::Region => t(
-            "Esc — cancel  ·  Right click — clear the selection  ·  {space} — move the selection  ·  {copy} — copy the translation",
+            "Drag around the text  ·  {space} — move the selection  ·  Right click — start over  ·  Esc — cancel",
         )
-        .replace("{space}", theme.platform.space_key())
-        .replace("{copy}", theme.platform.copy_shortcut()),
+        .replace("{space}", theme.platform.space_key()),
         CaptureMode::Window => {
             t("Point at a window and click  ·  Tab — mode  ·  Esc — cancel").to_string()
         }
@@ -502,14 +646,37 @@ fn paint_hint(ctx: &egui::Context, theme: &Theme, state: &OverlayState) {
             t("Click to translate the whole screen  ·  Esc — cancel").to_string()
         }
     };
-    let screen = ctx.screen_rect();
+    let screen = pointer_screen(ctx, state);
     egui::Area::new(egui::Id::new("capture_hint"))
         .order(egui::Order::Foreground)
         .fixed_pos(egui::pos2(screen.center().x, screen.max.y - 22.0))
         .pivot(Align2::CENTER_BOTTOM)
         .show(ctx, |ui| {
+            ui.set_opacity(state.dim());
             widgets::hint_pill(ui, theme, &hint);
         });
+}
+
+/// The rectangle of the overlay that lies on the display the pointer is on —
+/// where the controls are put, so they are in front of the user rather than
+/// straddling two monitors.
+fn pointer_screen(ctx: &egui::Context, state: &OverlayState) -> Rect {
+    let whole = ctx.screen_rect();
+    let origin = whole.min;
+    let at = ctx
+        .pointer_latest_pos()
+        .map(|p| state.geometry.to_physical(p, origin))
+        .or_else(cursor_position);
+    let Some((x, y)) = at else {
+        return whole;
+    };
+    let monitor = monitor_for(Bounds { x, y, w: 1, h: 1 }).bounds;
+    let rect = state.geometry.bounds_to_rect(monitor, origin).intersect(whole);
+    if rect.width() > 200.0 && rect.height() > 120.0 {
+        rect
+    } else {
+        whole
+    }
 }
 
 #[cfg(test)]
