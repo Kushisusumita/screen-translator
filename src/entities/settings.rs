@@ -543,6 +543,39 @@ impl Default for Presentation {
     }
 }
 
+// ── Reading the text ─────────────────────────────────────────────────────────
+
+/// Where the text of a capture is read.
+///
+/// On the machine itself it takes hundredths of a second and the picture
+/// goes nowhere; online it takes most of a second and reads more — any
+/// language, lettering a simpler recogniser gives up on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum Recogniser {
+    /// On this computer when it has a recogniser for the language and that
+    /// recogniser finds something; online otherwise.
+    #[default]
+    Auto,
+    /// On this computer and nowhere else.
+    Local,
+    /// Online, always.
+    Online,
+}
+
+impl Recogniser {
+    pub fn label(self) -> &'static str {
+        match self {
+            Recogniser::Auto => t("Automatically"),
+            Recogniser::Local => t("On this computer"),
+            Recogniser::Online => t("Online"),
+        }
+    }
+
+    pub fn all() -> [Recogniser; 3] {
+        [Recogniser::Auto, Recogniser::Local, Recogniser::Online]
+    }
+}
+
 // ── Translation engines ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -988,6 +1021,8 @@ pub struct Settings {
     pub engines: EngineSettings,
     pub logs: LogSettings,
     pub presentation: Presentation,
+    /// Where the text of a capture is read.
+    pub recogniser: Recogniser,
     /// How often a watched region is looked at again, in milliseconds.
     pub watch_interval_ms: u32,
 
@@ -1036,6 +1071,7 @@ impl Default for Settings {
             engines: EngineSettings::default(),
             logs: LogSettings::default(),
             presentation: Presentation::default(),
+            recogniser: Recogniser::Auto,
             watch_interval_ms: 1000,
             launch_at_startup: false,
             copy_to_clipboard: false,
@@ -1117,6 +1153,7 @@ mod tests {
         assert!(!s.hotkeys.hide.is_bound());
         assert_eq!(s.presentation, Presentation::default());
         assert!(!s.engines.ai_config.vision);
+        assert_eq!(s.recogniser, Recogniser::Auto);
     }
 
     #[test]

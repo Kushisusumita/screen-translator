@@ -95,6 +95,9 @@ pub struct ResultUi {
     /// Stays until closed on purpose — a sample put up from the settings
     /// window, which has to survive the clicks that tune it.
     pub keep: bool,
+    /// A read or a translation is in flight. Only a watched area shows it:
+    /// there the previous answer stays up while the next one is fetched.
+    pub busy: bool,
 
     /// The captured pixels. The in-place view paints over them and reads its
     /// colours from them.
@@ -143,6 +146,7 @@ impl ResultUi {
             close_on_click_away: true,
             watching: false,
             keep: false,
+            busy: false,
             shot: None,
             texture: None,
             since: now,

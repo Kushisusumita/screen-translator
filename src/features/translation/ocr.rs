@@ -11,6 +11,10 @@
 //! back is divided by that factor again, so nothing downstream has to know an
 //! upscale ever happened.
 
+pub mod layout;
+pub mod local;
+pub mod strokes;
+
 use serde_json::Value;
 use tracing::{debug, info, warn};
 
@@ -137,6 +141,7 @@ pub async fn recognize(image: &Encoded, size: (u32, u32)) -> Result<Recognised, 
         yum = s.yum,
     );
 
+    let asked = std::time::Instant::now();
     let part = reqwest::multipart::Part::bytes(image.jpeg.clone())
         .file_name("blob")
         .mime_str("image/jpeg")?;
@@ -180,6 +185,7 @@ pub async fn recognize(image: &Encoded, size: (u32, u32)) -> Result<Recognised, 
             blocks = result.blocks.len(),
             chars = result.text().chars().count(),
             detected = result.detected.map(|l| l.code()).unwrap_or("?"),
+            ms = asked.elapsed().as_millis() as u64,
             "OCR complete"
         );
         debug!(text = %redact(&result.text()));
@@ -299,7 +305,7 @@ fn parse(json: &Value, scale: f32, capture_width: f32) -> Recognised {
                 continue;
             };
 
-            let text = normalize_ocr_text(&lines.join("\n"));
+            let text = without_stray_brackets(&normalize_ocr_text(&lines.join("\n")));
             if text.is_empty() {
                 continue;
             }
@@ -313,13 +319,20 @@ fn parse(json: &Value, scale: f32, capture_width: f32) -> Recognised {
                 _ => 0.0,
             };
 
+            // The line the type is measured off is measured by its letters,
+            // and a bracket that was never there is taller than any of them.
+            let mut sample = sample.unwrap_or_default();
+            if lines.len() == 1 {
+                sample.text = without_stray_brackets(&sample.text);
+            }
+
             blocks.push(TextBlock {
                 rect,
                 text,
                 glyph_height: median(glyph_heights).unwrap_or(rect.h / lines.len() as f32),
                 lines: lines.len(),
                 align: alignment(&line_rects, rect, capture_width),
-                sample: sample.unwrap_or_default(),
+                sample,
                 pitch: pitch.max(0.0),
             });
         }
@@ -340,6 +353,27 @@ fn parse(json: &Value, scale: f32, capture_width: f32) -> Recognised {
         );
     }
     Recognised { blocks, detected }
+}
+
+/// Takes off a bracket that opens a paragraph and never closes, or closes
+/// one that never opened.
+///
+/// The rounded end of a button reads as a bracket to more than one
+/// recogniser, and `(EXIT` is not a word any engine translates: it came back
+/// as it went, bracket and all, on a menu whose other entries were in
+/// Russian.
+fn without_stray_brackets(text: &str) -> String {
+    let count = |mark: char| text.chars().filter(|c| *c == mark).count();
+    let mut text = text;
+    for (open, close) in [('(', ')'), ('[', ']'), ('{', '}')] {
+        if count(open) > count(close) {
+            text = text.strip_prefix(open).unwrap_or(text);
+        }
+        if count(close) > count(open) {
+            text = text.strip_suffix(close).unwrap_or(text);
+        }
+    }
+    text.trim().to_string()
 }
 
 /// Finds columns that are flush on the right.
@@ -682,6 +716,24 @@ mod tests {
         let r = parse_plain(&v);
         assert_eq!(r.text(), "no boxes here");
         assert_eq!(r.blocks[0].rect.w, 0.0);
+    }
+
+    #[test]
+    fn the_end_of_a_button_read_as_a_bracket_is_not_part_of_its_label() {
+        assert_eq!(without_stray_brackets("(EXIT"), "EXIT");
+        assert_eq!(without_stray_brackets("SETTINGS)"), "SETTINGS");
+        assert_eq!(without_stray_brackets("[ CREDITS"), "CREDITS");
+        // Brackets that pair up, or sit inside, are writing.
+        assert_eq!(without_stray_brackets("Save (recommended)"), "Save (recommended)");
+        assert_eq!(without_stray_brackets("(optional) extras"), "(optional) extras");
+        assert_eq!(without_stray_brackets("Press (E"), "Press (E");
+
+        let v = json!({"data":{"blocks":[
+            {"x":392,"y":1057,"w":223,"h":53,"boxes":[{"x":392,"y":1057,"w":223,"h":53,"text":"(EXIT"}]}
+        ]}});
+        let block = &parse_plain(&v).blocks[0];
+        assert_eq!(block.text, "EXIT");
+        assert_eq!(block.sample.text, "EXIT");
     }
 
     #[test]

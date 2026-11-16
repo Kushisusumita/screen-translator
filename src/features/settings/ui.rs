@@ -15,9 +15,11 @@ use egui::{Color32, Sense, Vec2};
 use crate::entities::history::{History, HistoryEntry};
 use crate::entities::language::Language;
 use crate::entities::settings::{
-    bindable_alone, AiProtocol, AutoHide, EngineKind, Hotkey, HotkeyAction, ResultView, Settings,
-    SubtitlePlace, SubtitleSize, AI_PRESETS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT,
+    bindable_alone, AiProtocol, AutoHide, EngineKind, Hotkey, HotkeyAction, Recogniser,
+    ResultView, Settings, SubtitlePlace, SubtitleSize, AI_PRESETS, MOD_ALT, MOD_CONTROL,
+    MOD_NOREPEAT, MOD_SHIFT,
 };
+use crate::features::translation::ocr::local;
 use crate::shared::i18n::{t, Lang};
 use crate::shared::secret::{sealing_available, Secret};
 use crate::ui::platform::Platform;
@@ -144,7 +146,12 @@ impl Section {
         if q.is_empty() {
             return true;
         }
-        self.label(platform).to_lowercase().contains(&q) || self.keywords().contains(&q)
+        self.label(platform).to_lowercase().contains(&q)
+            || self.keywords().contains(&q)
+            // Where text is read is on the engine page too, and came after
+            // the list of words that page answers to.
+            || (self == Section::Engine
+                && (t("Text recognition").to_lowercase().contains(&q) || "ocr".contains(&q)))
     }
 }
 
@@ -157,7 +164,9 @@ pub struct SettingsContext<'a> {
     pub update_progress: Option<f32>,
     pub ai_test_status: &'a str,
     pub ai_test_running: bool,
-    pub rejected_hotkeys: &'a [HotkeyAction],
+    /// Actions whose shortcut the system refused, each with the
+    /// combination still in effect for it, if any.
+    pub rejected_hotkeys: &'a [(HotkeyAction, Option<Hotkey>)],
     pub log_dir: std::path::PathBuf,
     pub history: &'a History,
 }
@@ -583,14 +592,21 @@ impl SettingsUi {
                     .replace("{second}", b.label()),
             );
         }
-        for action in info.rejected_hotkeys {
+        for (action, standing) in info.rejected_hotkeys {
+            // Only true of a change that was refused. A default that was
+            // taken before the app ever ran has nothing before it.
+            let message = if standing.is_some() {
+                t("The shortcut for \"{action}\" is taken by another program. \
+                    The previous one still applies.")
+            } else {
+                t("The shortcut for \"{action}\" is taken by another program, \
+                    so this action has no shortcut for now. Choose another combination.")
+            };
             notice(
                 ui,
                 theme,
                 theme.danger,
-                &t("The shortcut for \"{action}\" is taken by another program. \
-                    The previous one still applies.")
-                .replace("{action}", action.label()),
+                &message.replace("{action}", action.label()),
             );
         }
 
@@ -684,6 +700,86 @@ impl SettingsUi {
         info: &SettingsContext<'_>,
         out: &mut SettingsOutput,
     ) {
+        // Only where the machine has a recogniser of its own: without one
+        // there is nothing to choose between.
+        let readable = local::languages();
+        if !readable.is_empty() {
+            widgets::section_caption(ui, theme, t("Text recognition"));
+            widgets::list(ui, theme, |ui| {
+                widgets::row(
+                    ui,
+                    theme,
+                    RowSpec::new(t("Where text is read"))
+                        .subtitle(t("On this computer it is many times faster, and the picture is not sent anywhere"))
+                        .last(),
+                    |ui| {
+                        egui::ComboBox::from_id_salt("recogniser")
+                            .selected_text(s.recogniser.label())
+                            .width(190.0)
+                            .show_ui(ui, |ui| {
+                                for option in Recogniser::all() {
+                                    ui.selectable_value(&mut s.recogniser, option, option.label());
+                                }
+                            });
+                    },
+                );
+            });
+
+            let names = readable
+                .iter()
+                .map(|language| language.name_ru())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let read_as = local::language_for(s.source_lang, s.target_lang);
+            match s.recogniser {
+                Recogniser::Auto => {
+                    let mut message = t("This computer reads {languages}. Other languages, and pictures it finds no text in, are read online.")
+                        .replace("{languages}", &names);
+                    let more = match read_as {
+                        Some(language) if s.source_lang == Language::Auto => {
+                            Some(t("With the source language left on detection, text is read here as {language}. To read another language here, choose it as the source.")
+                                .replace("{language}", language.name_ru()))
+                        }
+                        None if s.source_lang != Language::Auto => {
+                            Some(t("{language} is not one of them, so it is read online. Adding it in Windows settings would let it be read here.")
+                                .replace("{language}", s.source_lang.name_ru()))
+                        }
+                        _ => None,
+                    };
+                    if let Some(more) = more {
+                        message.push(' ');
+                        message.push_str(&more);
+                    }
+                    hint(ui, theme, &message);
+                }
+                Recogniser::Local if read_as.is_none() => {
+                    notice(
+                        ui,
+                        theme,
+                        theme.warning,
+                        &local::missing(s.source_lang).user_message(),
+                    );
+                }
+                Recogniser::Local => {
+                    hint(
+                        ui,
+                        theme,
+                        &t("This computer reads {languages}. Text in any other language will not be read.")
+                            .replace("{languages}", &names),
+                    );
+                }
+                Recogniser::Online => {
+                    hint(
+                        ui,
+                        theme,
+                        t("Every capture is sent to the recognition service. It reads any language, and takes about a second."),
+                    );
+                }
+            }
+
+            widgets::section_caption(ui, theme, t("Translation"));
+        }
+
         hint(
             ui,
             theme,

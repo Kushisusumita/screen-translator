@@ -35,8 +35,16 @@ Click anywhere or press `Esc` and it is gone.
   Nothing else on the screen is covered, and the game keeps the keyboard.
 - **Subtitles** — or have the translation as a line at the bottom of the screen
   instead, the way film subtitles sit, and leave the original untouched.
-- **Watch an area** — select the dialogue box once and every new line is
-  translated as it appears, with no further key presses.
+- **Live translation** — select the dialogue box once — or a whole window, or
+  the whole screen — and the translation simply stays there: a see-through
+  layer over the game that follows the text as it changes, with no further key
+  presses. Nothing is injected and no game file is touched; it reads the
+  finished picture, the way you do.
+- **Read on your own machine** — on Windows the text is read by the recogniser
+  built into the system: in hundredths of a second for a dialogue box, a tenth
+  or two for a whole display, where the online one takes most of a second —
+  and the picture never leaves the computer. The online recogniser steps in
+  for languages Windows has no recogniser for.
 - **Four engines** — AI, DeepL, Yandex, Google — tried in the order you set; the
   first one that answers wins. An AI model that can see can be handed the
   screenshot itself, which copes with stylised type a recogniser gives up on.
@@ -86,7 +94,7 @@ in *Settings → Keyboard shortcuts*:
 | `Alt+Shift+W` | 🪟 Translate a window you point at |
 | `Alt+Shift+F` | 🖥️ Translate the whole screen the pointer is on |
 | `Alt+Shift+R` | 🔁 Translate the last area again, without selecting it |
-| `Alt+Shift+Q` | 👁️ Watch an area: translate it again whenever its text changes |
+| `Alt+Shift+Q` | 👁️ Live translation: keep an area translated as its text changes; again to stop |
 | `Esc` | ✖️ Take the translation off the screen (only while one is showing) |
 
 `F1`–`F12`, `Insert`, `Delete`, `Home`, `End`, `Page Up` and `Page Down` can be
@@ -112,9 +120,29 @@ what you read is what you get.
   minimise because a window appeared over it.
 - **Repeat** (`Alt+Shift+R`) is the one to keep under a finger — dialogue
   comes up in the same box every time, so select it once and repeat from then on.
-- **Watch** goes a step further and needs no key at all. It reads the area
-  through its own translation, so the two do not get in each other's way; press
+- **Live translation** (`Alt+Shift+Q`) goes a step further and needs no key at
+  all. Select the area — or press `Tab` for a window or the whole screen — and
+  a layer you can see through and click through stays over it. Only the
+  translated lines are painted; everything else there is the game itself. A
+  line comes down the moment the words under it change, and the new ones go up
+  a moment later. A small dot in the corner of the area says it is live; press
   the same shortcut again to stop.
+- Where the text is read on the machine itself, a live area is read again
+  every fraction of a second — over a scene in motion too — and translated as
+  soon as its words have changed and hold still: a new line of dialogue is up
+  in well under a second. Select the dialogue box rather than the whole screen
+  for the quickest response; a whole display takes many times longer to read
+  than a box. Nothing is sent anywhere until there is a new line to translate.
+- Read online, a live area over the original is looked at every 0.4 s or
+  sooner, whatever *General → Watching an area* says — that setting is for
+  subtitles, the card and the window. A scene that never stops moving is read
+  less and less often, so a cutscene does not turn into a stream of requests.
+- Text that moves without changing — a button that pulses, a prompt that
+  blinks — keeps its translation once it has been seen to say the same thing
+  twice.
+- The largest lettering on a title screen is usually the game's logo, drawn
+  rather than typed. Read on the machine, it is left alone unless it reads
+  the same at two sizes; the online recogniser makes more of such lettering.
 - Text laid straight over the scene, with no panel behind it, is given a plain
   dark caption — there is no surface to continue there.
 - If nothing shows up over a game in *exclusive* full-screen, switch the game to
@@ -131,6 +159,7 @@ what you read is what you get.
 | 👻 Let clicks pass through it to the game | *Appearance* | Off |
 | 🎬 Subtitle size, position and opacity, with a sample to try | *Appearance → Subtitles* | — |
 | 👁️ How often a watched area is checked | *General → Watching an area* | **1 s** |
+| 🔎 Where text is read — automatically · on this computer · online | *Engine → Text recognition* | **Automatically** |
 | 🔔 Notify about new versions | *About → Updates* | **On** |
 | 📋 Copy the translation to the clipboard | *General* | Off |
 | 🔇 Hide the tray icon (hotkeys keep working) | *General* | Off |
@@ -167,7 +196,29 @@ instead of the system's usual place: a portable copy, or a second profile.
 
 - 💻 Windows 10 or 11 (x64), macOS 13+, or a Linux desktop (X11, or Wayland with
   the screencast portal)
-- 🌐 Internet connection, unless you point the AI engine at a local model
+- 🌐 Internet connection for the translation engines, unless you point the AI
+  engine at a local model. On Windows the reading of the text needs none.
+
+<details>
+<summary>🪟 <b>Windows</b> — which languages are read on the computer itself</summary>
+
+Those Windows has a text recogniser installed for: as a rule the display
+language, plus any language added in *Settings → Time & language → Language &
+region*, where a language brings its recogniser with it if Windows has one.
+*Settings → Engine* in the app lists what it found.
+
+With the source language left on **Detect automatically** there is nothing to
+detect with — a recogniser has to be told its language before it reads — so
+text is read as English when that is installed and is not the language you
+translate into. To have another installed language read on the computer,
+choose it as the source language.
+
+Everything else goes to the online recogniser, as does a capture the built-in
+one finds no text in. *Where text is read* can pin it either way: **On this
+computer** never sends a picture anywhere, **Online** always does — it is
+slower, and reads lettering the built-in recogniser gives up on.
+
+</details>
 
 <details>
 <summary>🍎 <b>macOS</b> — two permissions, asked for on first use</summary>

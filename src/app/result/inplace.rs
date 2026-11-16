@@ -19,6 +19,14 @@
 //!
 //! When the pieces cannot be told apart — a model read the screenshot itself,
 //! or an engine merged two lines — the whole area becomes one plate instead.
+//!
+//! A *watched* area is different in one respect that changes everything: it
+//! is live. There the window shows no captured pixels at all. It is glass —
+//! see-through, and clicks fall through it to the game — with only the plates
+//! painted on it, and each plate stays up exactly as long as the words it
+//! translates are still on the screen underneath. The game keeps moving behind
+//! it; a line of dialogue is replaced, its plate is gone by the next look, and
+//! the new translation arrives a moment later.
 
 use std::sync::Arc;
 
@@ -30,9 +38,11 @@ use egui::{
 use super::fit::{self, Grow};
 use super::{chrome, ResultAction, ResultUi, Stage};
 use crate::entities::settings::ResultView;
-use crate::features::capture::frame::{readable_on, Clearance, Rgb, TextColours};
-use crate::features::capture::{native, Bounds};
-use crate::features::translation::ocr::Align;
+use crate::features::capture::frame::{
+        blend, readable_on, Clearance, InkPrint, Rgb, TextColours,
+    };
+use crate::features::capture::{native, Bounds, Frame};
+use crate::features::translation::ocr::{Align, Line, PxRect};
 use crate::features::translation::PipelineResult;
 use crate::shared::i18n::t;
 use crate::ui::{icons, Theme};
@@ -71,12 +81,24 @@ const QUIET_TEXT: Rgb = Rgb(214, 214, 220);
 #[derive(Default)]
 pub(super) struct Cache {
     layout: Option<Arc<Layout>>,
+    /// For a watched area: which plates have had their text move on from
+    /// under them since they were put up, and are not being painted.
+    gone: Vec<bool>,
+    /// Texts whose plates are not held against the screen any more. See
+    /// [`ResultUi::keep_up`].
+    restless: Vec<String>,
 }
+
+/// How many restless texts are remembered. A screen does not hold more
+/// buttons that pulse than this, and the list is searched for every plate.
+const MOST_RESTLESS: usize = 48;
 
 /// Everything worked out once per result rather than once per frame.
 struct Layout {
     revision: u64,
     show_original: bool,
+    /// Laid out for a watched area, where a message is not put on a plate.
+    live: bool,
     /// The window, in desktop pixels. Usually the captured rectangle; taller
     /// or wider when the translation needed more room than the original had.
     window: Bounds,
@@ -97,6 +119,21 @@ struct Plate {
     /// Where the text hangs from: its top-left, top-centre or top-right,
     /// according to how it is aligned.
     text_pos: Pos2,
+    /// What the plate was put over, for telling later whether it still is.
+    source: Option<Source>,
+    /// The surface itself with the writing taken off, when it could be made:
+    /// painted instead of the colours above, which are then only what shows
+    /// through while it fades in.
+    healed: Option<egui::TextureHandle>,
+}
+
+/// The text a plate translates, as it was on the capture.
+struct Source {
+    /// In capture pixels.
+    rect: PxRect,
+    /// As sampled from the capture, before any dressing up for legibility.
+    colours: TextColours,
+    print: InkPrint,
 }
 
 /// How far a plate reaches past the box a paragraph was recognised in.
@@ -160,18 +197,12 @@ fn plate_colours(colours: TextColours, sampled_at: Rect, plate: Rect) -> [Color3
     if colours.is_flat() {
         return [colour(colours.background); 4];
     }
-    let [top_left, top_right, bottom_left, bottom_right] = colours.corners;
     let at = |x: f32, y: f32| {
-        // Only so far: past a paragraph's width again, a guess is a guess.
-        let u = ((x - sampled_at.min.x) / sampled_at.width().max(1.0)).clamp(-1.0, 2.0);
-        let v = ((y - sampled_at.min.y) / sampled_at.height().max(1.0)).clamp(-1.0, 2.0);
-        let channel = |of: fn(Rgb) -> u8| {
-            let top = of(top_left) as f32 + (of(top_right) as f32 - of(top_left) as f32) * u;
-            let bottom =
-                of(bottom_left) as f32 + (of(bottom_right) as f32 - of(bottom_left) as f32) * u;
-            (top + (bottom - top) * v).round().clamp(0.0, 255.0) as u8
-        };
-        Color32::from_rgb(channel(|c| c.0), channel(|c| c.1), channel(|c| c.2))
+        colour(blend(
+            colours.corners,
+            (x - sampled_at.min.x) / sampled_at.width().max(1.0),
+            (y - sampled_at.min.y) / sampled_at.height().max(1.0),
+        ))
     };
     [
         at(plate.min.x, plate.min.y),
@@ -247,6 +278,18 @@ fn baselines(galley: &Galley) -> Option<(f32, f32)> {
     Some((first - galley.rect.min.y, last - galley.rect.min.y))
 }
 
+/// What a line of the original measured, in points.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Measured {
+    /// The type size that reproduces it in the app's own font.
+    size: f32,
+    /// Where its baseline ran, down from the top of the capture.
+    baseline: f32,
+    /// How far in from the start and the end of the line its first and last
+    /// letter stand at that size.
+    margins: (f32, f32),
+}
+
 /// What the app's own font makes of a piece of text at [`REFERENCE`] size:
 /// where its ink starts and ends and where its baseline runs, all measured
 /// down from the top of the line.
@@ -255,6 +298,11 @@ struct Profile {
     top: f32,
     bottom: f32,
     baseline: f32,
+    /// How far into the line its ink starts, and how far short of the end of
+    /// the line it stops: an "R" stands a little way in from where its line
+    /// begins, a "T" reaches right up to it.
+    left: f32,
+    right: f32,
 }
 
 impl Profile {
@@ -270,6 +318,8 @@ impl Profile {
         let mut top = f32::INFINITY;
         let mut bottom = f32::NEG_INFINITY;
         let mut baseline = None;
+        let mut ink_from = f32::INFINITY;
+        let mut ink_to = f32::NEG_INFINITY;
         for glyph in &row.glyphs {
             // Spaces have a place in the line and nothing drawn in it.
             if glyph.uv_rect.is_nothing() {
@@ -279,13 +329,26 @@ impl Profile {
             top = top.min(glyph_top);
             bottom = bottom.max(glyph_top + glyph.uv_rect.size.y);
             baseline.get_or_insert(glyph.pos.y);
+            let glyph_left = glyph.pos.x + glyph.uv_rect.offset.x;
+            ink_from = ink_from.min(glyph_left);
+            ink_to = ink_to.max(glyph_left + glyph.uv_rect.size.x);
         }
         let baseline = baseline?;
         (bottom - top >= 1.0).then_some(Self {
             top,
             bottom,
             baseline,
+            left: ink_from - row.rect.min.x,
+            right: row.rect.max.x - ink_to,
         })
+    }
+
+    /// The same two distances for type of another size, kept within what a
+    /// letter's own margins can be: a figure well outside that is a glyph the
+    /// font does not have, drawn as something else.
+    fn margins_at(self, size: f32) -> (f32, f32) {
+        let scaled = |v: f32| (v * size / REFERENCE).clamp(-0.05 * size, 0.15 * size);
+        (scaled(self.left), scaled(self.right))
     }
 
     fn ink(self) -> f32 {
@@ -533,6 +596,8 @@ impl ResultUi {
         let layout = self.inplace_layout(ctx);
         let ppp = self.ppp;
         let window = layout.window;
+        // A watched area is glass over a moving picture, not a picture.
+        let live = self.watching;
 
         let builder = ViewportBuilder::default()
             .with_title(TITLE)
@@ -547,7 +612,8 @@ impl ResultUi {
             // keyboard away from a game.
             .with_active(!native::QUIET_WINDOWS)
             .with_visible(!self.starts_hidden())
-            .with_mouse_passthrough(self.style.click_through);
+            // Over a live area every click belongs to the game.
+            .with_mouse_passthrough(self.style.click_through || live);
 
         // The capture keeps its place on screen even when the window had to
         // move or grow around it.
@@ -563,7 +629,7 @@ impl ResultUi {
         let mut actions = Vec::new();
         let mut toggle_original = false;
         let has_result = matches!(self.stage, Stage::Done(_));
-        let interactive = !self.style.click_through;
+        let interactive = !self.style.click_through && !live;
         let accent = theme.sakura_soft;
 
         ctx.show_viewport_immediate(
@@ -579,13 +645,16 @@ impl ResultUi {
                         // A watched area is grabbed again and again from under
                         // this very window.
                         hidden_from_capture: self.watching,
-                        translucent: false,
+                        translucent: live,
                     },
                 );
                 native::place(TITLE, window);
                 native::reveal(ctx, self.frames);
 
-                if self.texture.is_none() {
+                // Nothing of the capture is shown over a live area, so it is
+                // not uploaded either: for a whole screen that is tens of
+                // megabytes of texture nobody would see.
+                if self.texture.is_none() && !live {
                     if let Some(shot) = &self.shot {
                         self.texture = Some(ctx.load_texture(
                             "inplace_shot",
@@ -596,15 +665,20 @@ impl ResultUi {
                 }
 
                 let mut screen = Rect::NOTHING;
+                let backdrop = if live {
+                    Color32::TRANSPARENT
+                } else {
+                    layout.filler
+                };
                 egui::CentralPanel::default()
-                    .frame(egui::Frame::none().fill(layout.filler))
+                    .frame(egui::Frame::none().fill(backdrop))
                     .show(ctx, |ui| {
                         screen = ui.max_rect();
                         let origin = screen.min.to_vec2();
                         let response = ui.allocate_rect(screen, Sense::click());
                         let painter = ui.painter();
 
-                        if let Some(texture) = &self.texture {
+                        if let (Some(texture), false) = (&self.texture, live) {
                             painter.image(
                                 texture.id(),
                                 image.translate(origin),
@@ -614,6 +688,9 @@ impl ResultUi {
                         }
 
                         match &self.stage {
+                            // Over a live area the wait is the mark in the
+                            // corner, not a frame across the game.
+                            Stage::Loading { .. } if live => {}
                             Stage::Loading { since, recognised } => paint_waiting(
                                 painter,
                                 screen,
@@ -631,27 +708,39 @@ impl ResultUi {
                                 }
                                 let mut fading = painter.clone();
                                 fading.set_opacity(appear);
-                                for plate in &layout.plates {
-                                    paint_plate(&fading, plate, origin);
+                                // A plate whose text has moved on is not
+                                // painted: it would be covering words it does
+                                // not translate.
+                                let up = |index: usize| {
+                                    !self.inplace.gone.get(index).copied().unwrap_or(false)
+                                };
+                                for (index, plate) in layout.plates.iter().enumerate() {
+                                    if up(index) {
+                                        paint_plate(&fading, plate, origin);
+                                    }
                                 }
                                 // Text after every plate, so one paragraph's
                                 // soft edge never dims its neighbour's letters.
-                                for plate in &layout.plates {
-                                    fading.galley(
-                                        plate.text_pos + origin,
-                                        plate.text.clone(),
-                                        Color32::WHITE,
-                                    );
+                                for (index, plate) in layout.plates.iter().enumerate() {
+                                    if up(index) {
+                                        fading.galley(
+                                            plate.text_pos + origin,
+                                            plate.text.clone(),
+                                            Color32::WHITE,
+                                        );
+                                    }
                                 }
                             }
                         }
 
-                        if self.watching {
-                            // A thin frame, so it is clear which area is live.
-                            painter.rect_stroke(
-                                screen.shrink(0.5),
-                                0.0,
-                                Stroke::new(1.0_f32, theme.tint(accent, 150)),
+                        if live {
+                            paint_live_mark(
+                                painter,
+                                screen,
+                                self.created.elapsed().as_secs_f32(),
+                                self.busy,
+                                matches!(self.stage, Stage::Error(_)),
+                                theme,
                             );
                         }
 
@@ -779,13 +868,110 @@ impl ResultUi {
 
     fn inplace_layout(&mut self, ctx: &egui::Context) -> Arc<Layout> {
         if let Some(layout) = &self.inplace.layout {
-            if layout.revision == self.revision && layout.show_original == self.show_original {
+            if layout.revision == self.revision
+                && layout.show_original == self.show_original
+                && layout.live == self.watching
+            {
                 return Arc::clone(layout);
             }
         }
         let layout = Arc::new(self.build_layout(ctx));
         self.inplace.layout = Some(Arc::clone(&layout));
+        // New plates, over text that is there by definition.
+        self.inplace.gone.clear();
         layout
+    }
+
+    /// Looks at the watched area as it is now and takes down every plate
+    /// whose text is no longer under it — and puts back any whose text has
+    /// returned. Says whether anything changed.
+    ///
+    /// `now` is a fresh capture of the same rectangle the result was made
+    /// from, taken with this window left out of it.
+    pub fn look_again(&mut self, now: &Frame) -> bool {
+        let Some(layout) = &self.inplace.layout else {
+            return false;
+        };
+        if layout.revision != self.revision {
+            return false;
+        }
+        let gone: Vec<bool> = layout
+            .plates
+            .iter()
+            .map(|plate| {
+                plate.source.as_ref().is_some_and(|source| {
+                    let r = source.rect;
+                    !now.still_shows(r.x, r.y, r.w, r.h, &source.colours, &source.print)
+                })
+            })
+            .collect();
+        if gone == self.inplace.gone {
+            return false;
+        }
+        tracing::debug!(
+            down = gone.iter().filter(|g| **g).count(),
+            of = gone.len(),
+            "Plates checked against the screen"
+        );
+        self.inplace.gone = gone;
+        true
+    }
+
+    /// Whether any of the translations painted over a watched area has had
+    /// its words go from under it and is waiting to be replaced.
+    pub fn outlived(&self) -> bool {
+        self.inplace.gone.iter().any(|gone| *gone)
+    }
+
+    /// The paragraphs whose translations have come down, as they read.
+    pub fn outlived_texts(&self) -> Vec<String> {
+        let Some(result) = self.result() else {
+            return Vec::new();
+        };
+        // Only where there is a plate to each paragraph, in their order.
+        if self.inplace.gone.len() != result.segments.len() {
+            return Vec::new();
+        }
+        result
+            .segments
+            .iter()
+            .zip(&self.inplace.gone)
+            .filter(|(_, gone)| **gone)
+            .map(|(segment, _)| segment.original.clone())
+            .collect()
+    }
+
+    /// Stops holding the plates over these texts against the screen.
+    ///
+    /// A plate comes down when the letters under it are no longer where
+    /// they were, which is nearly always because the text has changed. Not
+    /// always: a button that swells and shrinks, a prompt that blinks, a
+    /// title that drifts — their letters move, and they say the same thing
+    /// throughout. Their translations came down and went up again twice a
+    /// second. So when an area is read again and a paragraph whose plate had
+    /// come down turns out to read exactly as before, that text is known to
+    /// be restless, and from then on what keeps its translation up or takes
+    /// it down is what the area says when it is read, not where its pixels
+    /// are between readings.
+    pub fn keep_up(&mut self, texts: Vec<String>) {
+        for text in texts {
+            if !self.inplace.restless.contains(&text) {
+                self.inplace.restless.push(text);
+            }
+        }
+        let extra = self.inplace.restless.len().saturating_sub(MOST_RESTLESS);
+        self.inplace.restless.drain(..extra);
+    }
+
+    /// What a plate over this rectangle of the capture will be checked
+    /// against later.
+    fn source(&self, rect: PxRect, colours: TextColours) -> Option<Source> {
+        let shot = self.shot.as_ref()?;
+        Some(Source {
+            rect,
+            colours,
+            print: shot.ink_print(rect.x, rect.y, rect.w, rect.h, &colours),
+        })
     }
 
     fn build_layout(&self, ctx: &egui::Context) -> Layout {
@@ -796,28 +982,34 @@ impl ResultUi {
         let untouched = Layout {
             revision: self.revision,
             show_original: self.show_original,
+            live: self.watching,
             window: self.anchor,
             plates: Vec::new(),
             filler: Color32::BLACK,
         };
+        let whole = PxRect::new(0.0, 0.0, self.anchor.w as f32, self.anchor.h as f32);
 
         match &self.stage {
             Stage::Loading { .. } => untouched,
             // The capture exactly as it was: that *is* the original.
             Stage::Done(_) if self.show_original => untouched,
+            // A live area with nothing to translate in it, or one look that
+            // failed, is not news worth a plate across the game. The mark in
+            // the corner says what there is to say.
+            Stage::Error(_) | Stage::Empty(_) if self.watching => untouched,
             Stage::Done(result) if !result.segments.is_empty() && size.x >= NARROW => {
                 self.layout_paragraphs(ctx, result, size)
             }
             Stage::Done(result) => {
-                let colours =
-                    dressed(self.sample(0.0, 0.0, self.anchor.w as f32, self.anchor.h as f32));
+                let sampled = self.sample(whole.x, whole.y, whole.w, whole.h);
                 self.layout_single(
                     ctx,
                     &result.translated,
-                    colours,
+                    dressed(sampled),
                     17.0 * self.scale(),
                     260.0 * self.scale(),
                     size,
+                    self.source(whole, sampled),
                 )
             }
             Stage::Error(message) => self.layout_single(
@@ -827,6 +1019,7 @@ impl ResultUi {
                 12.5 * self.scale(),
                 320.0 * self.scale(),
                 size,
+                None,
             ),
             Stage::Empty(message) => self.layout_single(
                 ctx,
@@ -835,6 +1028,7 @@ impl ResultUi {
                 12.5 * self.scale(),
                 320.0 * self.scale(),
                 size,
+                None,
             ),
         }
     }
@@ -844,6 +1038,20 @@ impl ResultUi {
             Some(shot) => shot.text_colours(x, y, w, h),
             None => TextColours::flat(Rgb(24, 24, 28), Rgb(240, 240, 244)),
         }
+    }
+
+    /// A paragraph's box with whatever is at its ends and is not writing
+    /// taken off: see [`Frame::ink_inset`].
+    fn tightened(&self, rect: PxRect, glyph_height: f32) -> PxRect {
+        let Some(shot) = &self.shot else {
+            return rect;
+        };
+        let colours = shot.text_colours(rect.x, rect.y, rect.w, rect.h);
+        let (left, right) = shot.ink_inset(rect.x, rect.y, rect.w, rect.h, &colours, glyph_height);
+        if left > 0.0 || right > 0.0 {
+            tracing::debug!(left, right, "A box was wider than its writing");
+        }
+        PxRect::new(rect.x + left, rect.y, rect.w - left - right, rect.h)
     }
 
     /// How far the surface under a paragraph runs past it, in points.
@@ -872,9 +1080,9 @@ impl ResultUi {
     fn measured_type(
         &self,
         ctx: &egui::Context,
-        sample: &crate::features::translation::ocr::Line,
+        sample: &Line,
         colours: &TextColours,
-    ) -> Option<(f32, f32)> {
+    ) -> Option<Measured> {
         let shot = self.shot.as_ref()?;
         let r = sample.rect;
         let (top, bottom) = shot.ink_rows(r.x, r.y, r.w, r.h, colours)?;
@@ -883,20 +1091,30 @@ impl ResultUi {
         // Hung from the middle of the ink, where being a little wrong about
         // the size moves the baseline least.
         let baseline = (top + bottom) / 2.0 / self.ppp + below_middle;
-        Some((size, baseline))
+        Some(Measured {
+            size,
+            baseline,
+            margins: profile.margins_at(size),
+        })
     }
 
     /// Every paragraph on a plate of its own, where it was.
     fn layout_paragraphs(&self, ctx: &egui::Context, result: &PipelineResult, size: Vec2) -> Layout {
         let ppp = self.ppp;
         let bounds = Rect::from_min_size(Pos2::ZERO, size).shrink(1.0);
-        let blocks: Vec<Rect> = result
+        // Where each paragraph really is. Everything below is worked out
+        // from these rather than from the recogniser's own boxes.
+        let boxes: Vec<PxRect> = result
             .segments
             .iter()
-            .map(|s| {
+            .map(|s| self.tightened(s.rect, s.glyph_height))
+            .collect();
+        let blocks: Vec<Rect> = boxes
+            .iter()
+            .map(|r| {
                 Rect::from_min_size(
-                    Pos2::new(s.rect.x / ppp, s.rect.y / ppp),
-                    Vec2::new(s.rect.w / ppp, s.rect.h / ppp),
+                    Pos2::new(r.x / ppp, r.y / ppp),
+                    Vec2::new(r.w / ppp, r.h / ppp),
                 )
             })
             .collect();
@@ -906,6 +1124,9 @@ impl ResultUi {
             /// The type size as first worked out, before paragraphs of one
             /// size were given one size.
             estimate: f32,
+            /// The colours as they were on the capture.
+            sampled: TextColours,
+            /// The colours the plate and its type are painted in.
             colours: TextColours,
             grow: Grow,
             /// Room among its neighbours.
@@ -915,6 +1136,10 @@ impl ResultUi {
             margin: Margin,
             /// Where its first line stood, when that could be measured.
             baseline: Option<f32>,
+            /// How far outside its ink the line itself began and ended. A
+            /// box says where the letters are; type is set from where the
+            /// line starts, which for most letters is a little before.
+            margins: (f32, f32),
             /// On a caption of its own rather than on the surface it was on.
             caption: bool,
         }
@@ -922,9 +1147,9 @@ impl ResultUi {
         // First pass: read the picture around each paragraph.
         let mut readings = Vec::with_capacity(blocks.len());
         let mut estimates = Vec::with_capacity(blocks.len());
-        let mut all_measured = true;
+        let mut measured_at = Vec::with_capacity(blocks.len());
         for (i, segment) in result.segments.iter().enumerate() {
-            let r = segment.rect;
+            let r = boxes[i];
             let sampled = self.sample(r.x, r.y, r.w, r.h);
             let clear = self.clearance(r.x, r.y, r.w, r.h);
 
@@ -945,14 +1170,25 @@ impl ResultUi {
             };
 
             let glyph = segment.glyph_height / ppp;
-            let measured = self.measured_type(ctx, &segment.sample, &sampled);
-            all_measured &= measured.is_some();
-            let estimate = measured.map_or(glyph * BOX_TO_SIZE, |(size, _)| size);
+            // The first line, no wider than the paragraph turned out to be.
+            let first_line = {
+                let line = segment.sample.rect;
+                let left = line.x.max(r.x);
+                let right = line.right().min(r.right());
+                Line {
+                    rect: PxRect::new(left, line.y, (right - left).max(0.0), line.h),
+                    text: segment.sample.text.clone(),
+                }
+            };
+            let measured = self.measured_type(ctx, &first_line, &sampled);
+            measured_at.push(measured.is_some());
+            let estimate = measured.map_or(glyph * BOX_TO_SIZE, |m| m.size);
             let estimate = estimate.clamp(SMALLEST_TYPE + 1.0, 96.0);
             estimates.push(estimate);
             let margin = Margin::for_glyphs(glyph);
             readings.push(Reading {
                 estimate,
+                sampled,
                 colours: dressed(sampled),
                 grow,
                 neighbours,
@@ -962,7 +1198,8 @@ impl ResultUi {
                 } else {
                     margin
                 },
-                baseline: measured.map(|(_, baseline)| baseline),
+                baseline: measured.map(|m| m.baseline),
+                margins: measured.map_or((0.0, 0.0), |m| m.margins),
                 caption: sampled.busy,
             });
         }
@@ -970,7 +1207,7 @@ impl ResultUi {
         // Second pass: one size for everything that was set in one size. A
         // size measured off the pixels is good to a pixel or so; one taken
         // from a recogniser's box needs far more forgiving.
-        let preferred = fit::harmonise(&estimates, if all_measured { 1.12 } else { 1.3 });
+        let preferred = fit::harmonise(&estimates, &measured_at);
 
         // How tall a capital stands, as a share of the type size: what turns
         // "this size" into "this much of the picture is letters".
@@ -1042,14 +1279,24 @@ impl ResultUi {
                 "Placed"
             );
 
+            // Set from where the original's line began, not from where its
+            // first letter did: a column of labels starts on one line, and
+            // their first letters — an "R", a "T" — do not.
+            let (before, after) = reading.margins;
             let (left, right, anchor_x) = match reading.grow {
                 Grow::Both => {
                     let centre = block.center().x;
                     let half = (width / 2.0).max(block.width() / 2.0);
                     (centre - half, centre + half, centre)
                 }
-                Grow::Right => (block.min.x, block.max.x.max(block.min.x + width), block.min.x),
-                Grow::Left => (block.min.x.min(block.max.x - width), block.max.x, block.max.x),
+                Grow::Right => {
+                    let from = block.min.x - before;
+                    (from, block.max.x.max(from + width), from)
+                }
+                Grow::Left => {
+                    let to = block.max.x + after;
+                    (block.min.x.min(to - width), to, to)
+                }
             };
 
             // What has to be covered: the original, and the letters of the
@@ -1074,16 +1321,63 @@ impl ResultUi {
             .iter()
             .zip(texts)
             .zip(readings.iter().zip(&blocks))
-            .map(|((rect, (text, pos, original_top)), (reading, block))| {
-                let plate = reading.margin.around(*rect);
+            .zip(result.segments.iter().zip(&boxes))
+            .map(|(((rect, (text, pos, original_top)), (reading, block)), (segment, tight))| {
+                let sampled_at = block.expand(SAMPLED_OUTSIDE / ppp);
+                let in_pixels = |r: Rect| [r.min.x * ppp, r.min.y * ppp, r.width() * ppp, r.height() * ppp];
+                let plate = {
+                    // On whole pixels of the capture. A plate that ends part
+                    // of the way through one leaves the rest of it showing,
+                    // and a surface painted between pixels is a blurred one.
+                    let [x, y, w, h] = in_pixels(reading.margin.around(*rect));
+                    let (x0, y0) = (x.floor(), y.floor());
+                    let (x1, y1) = ((x + w).ceil(), (y + h).ceil());
+                    // Out to where the writing really ends: game type has
+                    // outlines and shadows the recogniser's box knows nothing of.
+                    let reach = (segment.glyph_height * 0.45).clamp(4.0, 24.0);
+                    let [left, top, right, bottom] = self.shot.as_ref().map_or([0.0; 4], |shot| {
+                        shot.overhang(
+                            [x0, y0, x1 - x0, y1 - y0],
+                            &reading.sampled,
+                            in_pixels(sampled_at),
+                            reach,
+                        )
+                    });
+                    tracing::debug!(
+                        plate = ?[x0, y0, x1 - x0, y1 - y0],
+                        sampled = ?in_pixels(sampled_at),
+                        corners = ?reading.sampled.corners,
+                        reach,
+                        left,
+                        top,
+                        right,
+                        bottom,
+                        "Plate"
+                    );
+                    Rect::from_min_max(
+                        Pos2::new((x0 - left) / ppp, (y0 - top) / ppp),
+                        Pos2::new((x1 + right) / ppp, (y1 + bottom) / ppp),
+                    )
+                };
+                // A caption is a thing of its own and stays a plain plate.
+                let healed = self
+                    .shot
+                    .as_ref()
+                    .filter(|_| !reading.caption)
+                    .and_then(|shot| {
+                        shot.healed(in_pixels(plate), &reading.sampled, in_pixels(sampled_at))
+                    })
+                    .map(|image| ctx.load_texture("plate", image, TextureOptions::LINEAR));
                 Plate {
+                    healed,
+                    source: if self.inplace.restless.contains(&segment.original) {
+                        None
+                    } else {
+                        self.source(*tight, reading.sampled)
+                    },
                     rect: plate,
                     rounding: if reading.caption { 6.0 } else { 2.0 },
-                    corners: plate_colours(
-                        reading.colours,
-                        block.expand(SAMPLED_OUTSIDE / ppp),
-                        plate,
-                    ),
+                    corners: plate_colours(reading.colours, sampled_at, plate),
                     fill: colour(reading.colours.background),
                     text,
                     // Carried along with its plate if stacking moved it.
@@ -1111,6 +1405,7 @@ impl ResultUi {
         Layout {
             revision: self.revision,
             show_original: self.show_original,
+            live: self.watching,
             window,
             plates,
             filler,
@@ -1119,6 +1414,7 @@ impl ResultUi {
 
     /// The whole area as one plate: for a result with no paragraph positions,
     /// and for messages.
+    #[allow(clippy::too_many_arguments)]
     fn layout_single(
         &self,
         ctx: &egui::Context,
@@ -1127,6 +1423,7 @@ impl ResultUi {
         preferred: f32,
         min_width: f32,
         size: Vec2,
+        source: Option<Source>,
     ) -> Layout {
         const PLATE_PAD: Vec2 = Vec2::new(10.0, 7.0);
         let ppp = self.ppp;
@@ -1171,8 +1468,11 @@ impl ResultUi {
         Layout {
             revision: self.revision,
             show_original: self.show_original,
+            live: self.watching,
             window,
             plates: vec![Plate {
+                source,
+                healed: None,
                 rect: Rect::from_min_size(Pos2::ZERO, Vec2::new(width, height)),
                 rounding: 0.0,
                 corners: plate_colours(
@@ -1204,6 +1504,19 @@ impl ResultUi {
 fn paint_plate(painter: &egui::Painter, plate: &Plate, origin: Vec2) {
     const EDGE: [(f32, f32); 3] = [(3.0, 0.22), (2.0, 0.42), (1.0, 0.68)];
     let rect = plate.rect.translate(origin);
+
+    // The surface itself, when there is one to paint: it meets what is around
+    // it exactly, so it wants no soft edge — that would only blur a join
+    // that cannot be seen.
+    if let Some(healed) = &plate.healed {
+        painter.image(
+            healed.id(),
+            rect,
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            Color32::WHITE,
+        );
+        return;
+    }
 
     if plate.corners.iter().all(|corner| *corner == plate.fill) {
         for (grow, alpha) in EDGE {
@@ -1238,6 +1551,55 @@ fn shade(painter: &egui::Painter, rect: Rect, corners: [Color32; 4]) {
     mesh.add_triangle(0, 1, 2);
     mesh.add_triangle(1, 2, 3);
     painter.add(egui::Shape::mesh(mesh));
+}
+
+/// What a watched area shows of itself.
+///
+/// A frame for the first couple of seconds, so it is plain which part of the
+/// screen has gone live; after that only a small mark in the corner, which
+/// turns while a new line is being read and goes red when a look fails.
+/// Anything more would be the translator drawing attention to itself across
+/// the game it is there to stay out of the way of.
+fn paint_live_mark(
+    painter: &egui::Painter,
+    screen: Rect,
+    age: f32,
+    busy: bool,
+    failed: bool,
+    theme: &Theme,
+) {
+    const FRAME_FOR: f32 = 2.5;
+    const FADE: f32 = 0.6;
+    let accent = if failed {
+        theme.danger
+    } else {
+        theme.sakura_soft
+    };
+
+    let frame = ((FRAME_FOR - age) / FADE).clamp(0.0, 1.0);
+    if frame > 0.0 {
+        painter.rect_stroke(
+            screen.shrink(1.0),
+            0.0,
+            Stroke::new(2.0_f32, theme.tint(accent, (frame * 170.0) as u8)),
+        );
+        // Often while it is fading, now and then while it is merely there.
+        let wait = if frame < 1.0 { 16 } else { 100 };
+        painter
+            .ctx()
+            .request_repaint_after(std::time::Duration::from_millis(wait));
+    }
+
+    let spot = Rect::from_min_size(screen.min + Vec2::splat(8.0), Vec2::splat(18.0));
+    painter.circle_filled(spot.center(), 10.0, chrome::TOOLBAR_FILL);
+    if busy {
+        icons::spinner(painter, spot.shrink(2.0), accent, age);
+        painter
+            .ctx()
+            .request_repaint_after(std::time::Duration::from_millis(50));
+    } else {
+        painter.circle_filled(spot.center(), 3.5, accent);
+    }
 }
 
 /// What the captured area shows while the translation is on its way: the
@@ -1277,9 +1639,69 @@ fn paint_waiting(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::language::Language;
+    use crate::entities::settings::EngineKind;
+    use crate::features::capture::Monitor;
+    use crate::features::translation::pipeline::Segment;
 
     fn rect(x: f32, y: f32, w: f32, h: f32) -> Rect {
         Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, h))
+    }
+
+    /// A result over a watched area, one paragraph to each text.
+    fn watched(texts: &[&str]) -> ResultUi {
+        let screen = Bounds { x: 0, y: 0, w: 1920, h: 1080 };
+        let area = Bounds { x: 100, y: 100, w: 400, h: 300 };
+        let mut ui = ResultUi::new(ResultView::Inline, area, Monitor { bounds: screen, work: screen }, 1.0);
+        let segments = texts
+            .iter()
+            .enumerate()
+            .map(|(i, text)| Segment {
+                rect: PxRect::new(10.0, 10.0 + 40.0 * i as f32, 200.0, 20.0),
+                original: text.to_string(),
+                translated: text.to_lowercase(),
+                glyph_height: 20.0,
+                lines: 1,
+                align: Align::Left,
+                sample: Line::default(),
+                pitch: 0.0,
+            })
+            .collect();
+        ui.set_stage(Stage::Done(Box::new(PipelineResult {
+            original: texts.join("
+"),
+            translated: texts.join("
+").to_lowercase(),
+            segments,
+            engine: EngineKind::Google,
+            source: Language::En,
+            target: Language::Ru,
+            elapsed: std::time::Duration::ZERO,
+            engine_elapsed: std::time::Duration::ZERO,
+            from_cache: false,
+        })));
+        ui
+    }
+
+    #[test]
+    fn the_paragraphs_whose_translations_came_down_are_named() {
+        let mut ui = watched(&["CONTINUE", "SUPPORT ME", "DISCORD"]);
+        assert!(ui.outlived_texts().is_empty());
+        ui.inplace.gone = vec![false, true, true];
+        assert_eq!(ui.outlived_texts(), ["SUPPORT ME", "DISCORD"]);
+        // Without a plate to each paragraph there is no saying which.
+        ui.inplace.gone = vec![true];
+        assert!(ui.outlived_texts().is_empty());
+    }
+
+    #[test]
+    fn restless_texts_are_remembered_once_each_and_not_without_end() {
+        let mut ui = watched(&[]);
+        ui.keep_up(vec!["SUPPORT ME".into(), "DISCORD".into(), "SUPPORT ME".into()]);
+        assert_eq!(ui.inplace.restless, ["SUPPORT ME", "DISCORD"]);
+        ui.keep_up((0..100).map(|i| format!("line {i}")).collect());
+        assert_eq!(ui.inplace.restless.len(), MOST_RESTLESS);
+        assert_eq!(ui.inplace.restless.last().map(String::as_str), Some("line 99"));
     }
 
     fn clear(left: f32, right: f32, below: f32) -> Clearance {

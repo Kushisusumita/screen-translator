@@ -16,12 +16,20 @@
 //! | `capture region`     | what the region shortcut does (also `window`, `screen`) |
 //! | `watch`              | what the watch shortcut does                       |
 //! | `select 60,60,900,360` | completes the selection with this rectangle      |
+//! | `area 60,60,900,360` | translates this rectangle, with no selecting       |
+//! | `watch 60,60,900,360` | watches this rectangle, with no selecting         |
+//! | `area whole 0,0,1920,1080` | the same, read as a whole window or screen   |
 //! | `cancel`             | abandons the selection                             |
 //! | `repeat`             | what the repeat shortcut does                      |
 //! | `hide`               | what Esc does to a translation                     |
 //! | `settings keys`      | opens the settings window on a page                |
 //! | `sample`             | puts the sample subtitle up                        |
 //! | `quit`               | exits                                              |
+//!
+//! `capture` and a bare `watch` put the selection overlay up across every
+//! display, as the shortcuts do. `area` and `watch` with a rectangle do not:
+//! they touch that rectangle and nothing else, which is what to use while
+//! somebody is using the rest of the screen.
 //!
 //! None of this is compiled into a release build.
 
@@ -37,6 +45,7 @@ use crate::entities::settings::CaptureMode;
 use crate::features::capture::overlay::Purpose;
 use crate::features::capture::Bounds;
 use crate::features::settings::ui::Section;
+use crate::features::translation::CaptureKind;
 
 pub(super) const VARIABLE: &str = "SAKURA_AUTOMATION";
 
@@ -90,6 +99,15 @@ fn parse_bounds(text: &str) -> Option<Bounds> {
     }
 }
 
+/// A rectangle, read as a selection around some text — or, with `whole` in
+/// front of it, as a window or a screen of many separate pieces.
+fn parse_area(text: &str) -> Option<(CaptureKind, Bounds)> {
+    match text.strip_prefix("whole") {
+        Some(rest) => Some((CaptureKind::Whole, parse_bounds(rest)?)),
+        None => Some((CaptureKind::Region, parse_bounds(text)?)),
+    }
+}
+
 impl App {
     pub(super) fn run_script(&mut self, ctx: &Context) {
         let Some(script) = self.script.as_mut() else {
@@ -112,6 +130,17 @@ impl App {
                         _ => CaptureMode::Region,
                     };
                     self.begin_capture(ctx, mode, Purpose::Translate);
+                }
+                "area" | "watch" if !rest.is_empty() => {
+                    let purpose = if verb == "watch" {
+                        Purpose::Watch
+                    } else {
+                        Purpose::Translate
+                    };
+                    match parse_area(rest) {
+                        Some((kind, bounds)) => self.capture_known(ctx, bounds, kind, purpose),
+                        None => warn!(step = %line, "Not a rectangle"),
+                    }
                 }
                 "watch" => self.watch_or_stop(ctx),
                 "select" => match (parse_bounds(rest), self.overlay.as_mut()) {
@@ -220,5 +249,25 @@ mod tests {
         );
         assert_eq!(parse_bounds("1,2,3"), None);
         assert_eq!(parse_bounds("a,b,c,d"), None);
+    }
+
+    #[test]
+    fn an_area_is_a_selection_unless_it_says_whole() {
+        let bounds = Bounds {
+            x: 2620,
+            y: 60,
+            w: 600,
+            h: 670,
+        };
+        assert_eq!(
+            parse_area("2620,60,600,670"),
+            Some((CaptureKind::Region, bounds))
+        );
+        assert_eq!(
+            parse_area("whole 2620,60,600,670"),
+            Some((CaptureKind::Whole, bounds))
+        );
+        assert_eq!(parse_area("whole"), None);
+        assert_eq!(parse_area("somewhere"), None);
     }
 }

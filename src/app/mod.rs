@@ -266,6 +266,7 @@ impl App {
         ui.style = self.settings.presentation;
         ui.close_on_click_away = self.settings.close_result_on_focus_loss;
         ui.watching = self.is_watching();
+        ui.busy = self.is_translating();
         ui.render(ctx, &theme, self.history.len());
 
         let mut close = false;
@@ -651,7 +652,9 @@ impl App {
                 Duration::from_millis(100)
             }
         } else if self.is_watching() {
-            Duration::from_millis(self.settings.watch_interval_ms.clamp(300, 5000) as u64 / 2)
+            // Twice as often as the area is looked at, so a look is never
+            // more than half an interval late.
+            self.look_interval() / 2
         } else if self.settings_open {
             Duration::from_millis(100)
         } else {

@@ -22,7 +22,7 @@
 //!   here rather than of the toolkit.
 
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{BOOL, HANDLE, HWND, POINT, RECT};
+use windows::Win32::Foundation::{BOOL, COLORREF, HANDLE, HWND, POINT, RECT};
 use windows::Win32::Graphics::Dwm::{
     DwmEnableBlurBehindWindow, DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED,
     DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DWM_BB_BLURREGION, DWM_BB_ENABLE,
@@ -31,10 +31,11 @@ use windows::Win32::Graphics::Dwm::{
 use windows::Win32::Graphics::Gdi::{CreateRectRgn, DeleteObject};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, GetCursorPos, GetPropW, GetWindowDisplayAffinity, GetWindowLongW,
-    GetWindowRect, SetPropW, SetWindowDisplayAffinity, SetWindowLongW, SetWindowPos,
-    GWL_EXSTYLE, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOOWNERZORDER, WDA_EXCLUDEFROMCAPTURE,
-    WDA_NONE, WS_EX_NOACTIVATE,
+    FindWindowW, GetCursorPos, GetLayeredWindowAttributes, GetPropW, GetWindowDisplayAffinity,
+    GetWindowLongW, GetWindowRect, SetLayeredWindowAttributes, SetPropW,
+    SetWindowDisplayAffinity, SetWindowLongW, SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST,
+    LAYERED_WINDOW_ATTRIBUTES_FLAGS, SWP_NOACTIVATE, SWP_NOOWNERZORDER, WDA_EXCLUDEFROMCAPTURE,
+    WDA_NONE, WS_EX_LAYERED, WS_EX_NOACTIVATE,
 };
 
 use super::screenshot::Bounds;
@@ -103,16 +104,18 @@ pub fn apply(title: &str, behaviour: Behaviour) -> bool {
         if behaviour.translucent {
             compose_by_alpha(hwnd);
         }
+        draw_if_layered(hwnd);
 
+        let hide = behaviour.hidden_from_capture && !shown_in_captures();
         let mut affinity = 0u32;
         let _ = GetWindowDisplayAffinity(hwnd, &mut affinity);
         let hidden = affinity == WDA_EXCLUDEFROMCAPTURE.0;
-        if hidden != behaviour.hidden_from_capture {
+        if hidden != hide {
             // Refused before Windows 10 2004. Nothing to report: the caller
             // asks `hides_from_capture` and works around it.
             let _ = SetWindowDisplayAffinity(
                 hwnd,
-                if behaviour.hidden_from_capture {
+                if hide {
                     WDA_EXCLUDEFROMCAPTURE
                 } else {
                     WDA_NONE
@@ -121,6 +124,46 @@ pub fn apply(title: &str, behaviour: Behaviour) -> bool {
         }
     }
     true
+}
+
+/// Lets a click-through window be seen.
+///
+/// Letting clicks fall through a window means giving it the "layered" style,
+/// and Windows does not draw a layered window at all until it has been told
+/// *how* it is layered. winit sets the style and stops there, so a window
+/// made click-through simply vanished: still there, still on top, drawing
+/// into nothing. Telling Windows "no colour key, no overall opacity" is the
+/// whole of what was missing; the window is then drawn as any other is, its
+/// own alpha included.
+///
+/// Asked every frame, because winit rewrites the style whenever one of its
+/// flags changes and a style taken off and put back starts again untold.
+unsafe fn draw_if_layered(hwnd: HWND) {
+    let style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+    if style & WS_EX_LAYERED.0 == 0 {
+        return;
+    }
+    // Fails for exactly one reason: nobody has said yet.
+    let told = GetLayeredWindowAttributes(hwnd, None, None, None).is_ok();
+    if !told {
+        let _ = SetLayeredWindowAttributes(
+            hwnd,
+            COLORREF(0),
+            0,
+            LAYERED_WINDOW_ATTRIBUTES_FLAGS(0),
+        );
+    }
+}
+
+/// Development builds only: `SAKURA_SHOW_IN_CAPTURES` leaves every window in
+/// screen captures, so that a watched area's translation — which is otherwise
+/// invisible to anything that takes a screenshot, by design — can be looked
+/// at in one. Watching does not work with it set; it is for the one picture.
+fn shown_in_captures() -> bool {
+    static ASKED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ASKED.get_or_init(|| {
+        cfg!(debug_assertions) && std::env::var_os("SAKURA_SHOW_IN_CAPTURES").is_some()
+    })
 }
 
 /// Has the compositor blend the window by the alpha it was drawn with.

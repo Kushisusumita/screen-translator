@@ -23,11 +23,23 @@ use std::thread;
 
 use tracing::{error, info, warn};
 
-use crate::entities::settings::{HotkeyAction, Hotkeys};
+use crate::entities::settings::{Hotkey, HotkeyAction, Hotkeys};
 
-/// Which bindings the OS actually accepted. The settings window turns a `false`
-/// here into a visible warning next to the row.
-pub type Accepted = Arc<Mutex<Vec<(HotkeyAction, bool)>>>;
+/// What became of one binding when the set was last applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// In effect — or unbound on purpose, which is the same thing.
+    Accepted,
+    /// Refused by the system, nearly always because another program holds
+    /// the combination. `standing` is the earlier combination where that is
+    /// still in effect. `None` means the action has no shortcut at all: the
+    /// state a first launch is in when one of the defaults is already taken.
+    Refused { standing: Option<Hotkey> },
+}
+
+/// Which bindings the OS actually accepted. The settings window turns a
+/// refusal here into a visible warning next to the row.
+pub type Accepted = Arc<Mutex<Vec<(HotkeyAction, Outcome)>>>;
 
 pub struct HotkeyManager {
     events: Receiver<HotkeyAction>,
@@ -88,13 +100,17 @@ impl HotkeyManager {
         }
     }
 
-    pub fn rejected(&self) -> Vec<HotkeyAction> {
+    /// The actions whose shortcut was refused, each with the combination
+    /// that is in effect for it instead, if any.
+    pub fn rejected(&self) -> Vec<(HotkeyAction, Option<Hotkey>)> {
         self.accepted
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .filter(|(_, ok)| !ok)
-            .map(|(a, _)| *a)
+            .filter_map(|(action, outcome)| match outcome {
+                Outcome::Accepted => None,
+                Outcome::Refused { standing } => Some((*action, *standing)),
+            })
             .collect()
     }
 
@@ -206,7 +222,7 @@ mod portable {
                     // Unbound on purpose is not a rejection; an unmappable key is.
                     if binding.is_bound() {
                         warn!(?action, key = binding.key, "No portable code for this key");
-                        accepted.push((action, false));
+                        accepted.push((action, Outcome::Refused { standing: None }));
                     }
                     continue;
                 };
@@ -215,14 +231,14 @@ mod portable {
                     Ok(()) => {
                         bindings.insert(hotkey.id(), action);
                         live.push(hotkey);
-                        accepted.push((action, true));
+                        accepted.push((action, Outcome::Accepted));
                         info!(?action, "Hotkey registered");
                     }
                     Err(e) => {
                         // Almost always another application holding the same
                         // combination. The settings window shows this.
                         warn!(?action, error = %e, "Hotkey rejected");
-                        accepted.push((action, false));
+                        accepted.push((action, Outcome::Refused { standing: None }));
                     }
                 }
             }
@@ -613,6 +629,11 @@ mod win {
 
             let mut results = Vec::new();
             let mut committed = state.current;
+            // The earlier binding is kept when its replacement is refused —
+            // if there was one. At first launch there is not.
+            let refused = |have: Hotkey| Outcome::Refused {
+                standing: have.is_bound().then_some(have),
+            };
 
             for (action, want) in wanted.all() {
                 let id = slot_id(action);
@@ -622,14 +643,14 @@ mod win {
                     // Nothing to do. Note this counts as success even for an
                     // unbound action: "no shortcut wanted, no shortcut set" is
                     // the desired state, not a failure to register one.
-                    results.push((action, true));
+                    results.push((action, Outcome::Accepted));
                     continue;
                 }
 
                 if !want.is_bound() {
                     let _ = UnregisterHotKey(hwnd, id);
                     *committed.slot_mut(action) = want;
-                    results.push((action, true));
+                    results.push((action, Outcome::Accepted));
                     continue;
                 }
 
@@ -646,7 +667,7 @@ mod win {
                         combo = %want.display(),
                         "Combination is taken by another application; keeping the previous one"
                     );
-                    results.push((action, false));
+                    results.push((action, refused(have)));
                     continue;
                 }
                 let _ = UnregisterHotKey(hwnd, PROBE_ID);
@@ -656,7 +677,7 @@ mod win {
                     Ok(()) => {
                         info!(action = ?action, combo = %want.display(), "Hotkey registered");
                         *committed.slot_mut(action) = want;
-                        results.push((action, true));
+                        results.push((action, Outcome::Accepted));
                     }
                     Err(e) => {
                         error!(action = ?action, error = ?e, "RegisterHotKey failed");
@@ -669,7 +690,7 @@ mod win {
                                 have.key,
                             );
                         }
-                        results.push((action, false));
+                        results.push((action, refused(have)));
                     }
                 }
             }

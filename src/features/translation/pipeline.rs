@@ -11,20 +11,27 @@
 //!   and better on text a recogniser struggles with, but it has no geometry to
 //!   offer, so it is only taken for a region the user drew around the text.
 //!
+//! The reading itself has two homes as well. Where the machine has a
+//! recogniser of its own for the language, the capture is read there: in
+//! hundredths of a second, and without the picture going anywhere. The online
+//! recogniser is what is turned to when there is none, or when the one here
+//! found nothing.
+//!
 //! Everything slow here — encoding included — happens off the UI thread.
 
 use std::time::{Duration, Instant};
 
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::entities::language::Language;
-use crate::entities::settings::{EngineKind, EngineSettings, Settings};
+use crate::entities::settings::{EngineKind, EngineSettings, Recogniser, Settings};
 use crate::features::capture::screenshot::{encode_frame, encode_frame_for_vision};
 use crate::features::capture::Frame;
 use crate::features::translation::cache;
-use crate::features::translation::ocr::{self, Align, Line, PxRect, TextBlock};
+use crate::features::translation::ocr::{self, Align, Line, PxRect, Recognised, TextBlock};
 use crate::features::translation::providers::{self, ai, TranslateRequest};
 use crate::shared::error::AppError;
+use crate::shared::i18n::t;
 
 /// Everything the pipeline needs, copied out of `Settings` so nothing is
 /// shared with the UI thread while a request is in flight.
@@ -33,6 +40,7 @@ pub struct PipelineParams {
     pub source: Language,
     pub target: Language,
     pub engines: EngineSettings,
+    pub recogniser: Recogniser,
 }
 
 impl From<&Settings> for PipelineParams {
@@ -41,7 +49,30 @@ impl From<&Settings> for PipelineParams {
             source: s.source_lang,
             target: s.target_lang,
             engines: s.engines.clone(),
+            recogniser: s.recogniser,
         }
+    }
+}
+
+impl PipelineParams {
+    /// The language a capture would be read as on this machine, if it would
+    /// be read here at all.
+    pub fn read_here_as(&self) -> Option<Language> {
+        match self.recogniser {
+            Recogniser::Online => None,
+            Recogniser::Auto | Recogniser::Local => {
+                ocr::local::language_for(self.source, self.target)
+            }
+        }
+    }
+
+    /// Whether a capture of this kind is handed to a model as a picture
+    /// instead of being read first.
+    pub fn shows_the_model(&self, kind: CaptureKind) -> bool {
+        // Not when the picture was to stay on this machine.
+        kind == CaptureKind::Region
+            && self.recogniser != Recogniser::Local
+            && self.engines.reads_screenshots()
     }
 }
 
@@ -93,25 +124,97 @@ pub struct PipelineResult {
     pub from_cache: bool,
 }
 
+/// How the text of a capture came to be read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reading {
+    /// By the recogniser on this machine, as opposed to the online one.
+    pub here: bool,
+    /// There was text.
+    pub found: bool,
+    pub elapsed: Duration,
+}
+
 /// Milestones worth showing before the result is in.
 #[derive(Debug, Clone)]
 pub enum Progress {
+    /// The capture has been read, whatever was or was not in it.
+    Read(Reading),
     /// The text has been read; translation is under way.
     Recognised(String),
+}
+
+/// The terms on which a watched area is read once more.
+///
+/// Reading on this machine costs so little that an area can be read again
+/// every fraction of a second, a scene in motion included. Translating
+/// cannot be: every new text is a request to a service that belongs to
+/// someone else. So a reading made on these terms goes no further than the
+/// text unless the text is worth a request — new, and done changing.
+#[derive(Debug, Clone, Default)]
+pub struct Again {
+    /// What is translated and on screen already, where that still stands.
+    pub shown: Option<String>,
+    /// What the area said the last time it was read.
+    pub heard: Option<String>,
+    /// The picture has come to rest, so what it says now is what it says.
+    /// Without that, a text has to be read twice running before it counts:
+    /// a line being typed out letter by letter is a new text at every look.
+    pub settled: bool,
+    /// A translation may be asked for. Not when too many have been lately.
+    pub may_translate: bool,
+    /// The online recogniser may be turned to if the one here finds nothing.
+    pub online: bool,
+}
+
+impl Again {
+    /// Whether what the area says now is worth translating: not what is
+    /// translated already, and not something still on its way to being
+    /// something else.
+    fn is_news(&self, text: &str) -> bool {
+        let same = |known: &Option<String>| known.as_deref() == Some(text);
+        !same(&self.shown) && (self.settled || same(&self.heard))
+    }
+}
+
+/// What came of a capture.
+#[derive(Debug, Clone)]
+pub enum Outcome {
+    Translated(Box<PipelineResult>),
+    /// It was read and left at that, as [`Again`] asked: there was nothing
+    /// in it to translate yet. The text is what it said.
+    Held(String),
 }
 
 pub async fn run(
     frame: Frame,
     kind: CaptureKind,
     params: &PipelineParams,
+    again: Option<&Again>,
     progress: impl Fn(Progress),
-) -> Result<PipelineResult, AppError> {
-    let started = Instant::now();
-    let size = (frame.width() as u32, frame.height() as u32);
+) -> Result<Outcome, AppError> {
+    translate(frame, kind, params, again, progress)
+        .await
+        .map(|outcome| match outcome {
+            Ok(result) => Outcome::Translated(Box::new(result)),
+            Err(text) => Outcome::Held(text),
+        })
+}
 
-    if kind == CaptureKind::Region && params.engines.reads_screenshots() {
+/// The pipeline itself. Inside the outer result, `Err` is not a failure but
+/// a text that was read and held back.
+async fn translate(
+    frame: Frame,
+    kind: CaptureKind,
+    params: &PipelineParams,
+    again: Option<&Again>,
+    progress: impl Fn(Progress),
+) -> Result<Result<PipelineResult, String>, AppError> {
+    let started = Instant::now();
+    let may_go_online = again.map_or(true, |again| again.online);
+
+    if params.shows_the_model(kind) && may_go_online {
         match read_with_ai(&frame, params, started).await {
-            Ok(result) => return Ok(result),
+            Ok(result) => return Ok(Ok(result)),
             // The model looked and found nothing. A recogniser will not find
             // more, and asking it would only delay saying so.
             Err(AppError::NoText) => return Err(AppError::NoText),
@@ -123,14 +226,23 @@ pub async fn run(
         }
     }
 
-    let encoded = blocking(move || encode_frame(&frame)).await?;
-    let recognised = ocr::recognize(&encoded, size).await?;
-    if recognised.is_empty() {
+    let (recognised, here) = read(frame, params, may_go_online).await?;
+    let original = recognised.text();
+    let found = !recognised.is_empty() && !original.trim().is_empty();
+    progress(Progress::Read(Reading {
+        here,
+        found,
+        elapsed: started.elapsed(),
+    }));
+    if !found {
         return Err(AppError::NoText);
     }
-    let original = recognised.text();
-    if original.trim().is_empty() {
-        return Err(AppError::NoText);
+
+    // A reading made cheaply, to see whether anything has changed: it stops
+    // here unless something has, and has finished changing.
+    let held = again.filter(|again| !again.online);
+    if held.is_some_and(|again| !again.is_news(&original)) {
+        return Ok(Err(original));
     }
     progress(Progress::Recognised(original.clone()));
 
@@ -143,7 +255,7 @@ pub async fn run(
             lang = source.code(),
             "Text is already in the target language"
         );
-        return Ok(PipelineResult {
+        return Ok(Ok(PipelineResult {
             segments: align(&recognised.blocks, &original),
             translated: original.clone(),
             original,
@@ -153,22 +265,28 @@ pub async fn run(
             elapsed: started.elapsed(),
             engine_elapsed: Duration::ZERO,
             from_cache: false,
-        });
+        }));
     }
 
     if let Some(hit) = cache::get(&original, source, params.target) {
         info!(engine = hit.engine.label(), "Cache hit");
-        return Ok(PipelineResult {
-            segments: align(&recognised.blocks, &hit.text),
+        let segments = align(&recognised.blocks, &hit.text);
+        return Ok(Ok(PipelineResult {
+            translated: whole(&segments, &original, hit.text),
+            segments,
             original,
-            translated: hit.text,
             engine: hit.engine,
             source,
             target: params.target,
             elapsed: started.elapsed(),
             engine_elapsed: Duration::ZERO,
             from_cache: true,
-        });
+        }));
+    }
+
+    // From here on it costs a request.
+    if held.is_some_and(|again| !again.may_translate) {
+        return Ok(Err(original));
     }
 
     let request = TranslateRequest {
@@ -197,9 +315,9 @@ pub async fn run(
         );
     }
 
-    Ok(PipelineResult {
+    Ok(Ok(PipelineResult {
+        translated: whole(&segments, &original, translated.text),
         original,
-        translated: translated.text,
         segments,
         engine: translated.engine,
         source,
@@ -207,7 +325,79 @@ pub async fn run(
         elapsed: started.elapsed(),
         engine_elapsed: translated.elapsed,
         from_cache: false,
-    })
+    }))
+}
+
+/// How long the recogniser on this machine is waited for.
+const HERE_PATIENCE: Duration = Duration::from_secs(8);
+
+/// Reads the text of a capture, and says whether it was read on this
+/// machine.
+///
+/// Here first, where there is a recogniser for the language. What it finds
+/// is taken as it is. When it finds nothing the online recogniser is asked
+/// as well, if it may be: nothing found here can mean there is nothing, and
+/// can mean lettering this recogniser was not made for. Whoever watches an
+/// area decides which — it knows whether this recogniser has ever read that
+/// area — and says so through `may_go_online`.
+async fn read(
+    frame: Frame,
+    params: &PipelineParams,
+    may_go_online: bool,
+) -> Result<(Recognised, bool), AppError> {
+    let size = (frame.width() as u32, frame.height() as u32);
+    let here_only = params.recogniser == Recogniser::Local;
+
+    match params.read_here_as() {
+        Some(language) => {
+            let shot = frame.clone();
+            let reading = blocking(move || ocr::local::read(&shot, language));
+            // It answers in a fraction of a second or something is wrong
+            // with it, and a capture must not wait on that for ever.
+            let answered = tokio::time::timeout(HERE_PATIENCE, reading)
+                .await
+                .unwrap_or_else(|_| {
+                    Err(AppError::Other(
+                        t("Text recognition is unavailable right now").to_string(),
+                    ))
+                });
+            match answered {
+                Ok(mut found) => {
+                    if !found.is_empty() || here_only || !may_go_online {
+                        // A language the user named is the language it was
+                        // read in. One that was only assumed is left for
+                        // the translator to make out: German read by the
+                        // English recogniser is still German.
+                        if params.source != Language::Auto && !found.is_empty() {
+                            found.detected = Some(language);
+                        }
+                        return Ok((found, true));
+                    }
+                    debug!("Nothing was read on this computer; asking the online recogniser");
+                }
+                Err(e) if here_only => return Err(e),
+                Err(e) => {
+                    warn!(error = %e, "Could not read on this computer; asking the online recogniser");
+                }
+            }
+        }
+        None if here_only => return Err(ocr::local::missing(params.source)),
+        None => {}
+    }
+    if !may_go_online {
+        return Ok((Recognised::default(), true));
+    }
+
+    let encoding = Instant::now();
+    let encoded = blocking(move || encode_frame(&frame)).await?;
+    debug!(
+        ms = encoding.elapsed().as_millis() as u64,
+        bytes = encoded.jpeg.len(),
+        scale = encoded.scale,
+        "Picture prepared for recognition"
+    );
+    let found = ocr::recognize(&encoded, size).await?;
+    Ok((found, false))
 }
 
 async fn read_with_ai(
@@ -298,6 +488,57 @@ fn source_language(text: &str, detected: Option<Language>, configured: Language)
     detected.unwrap_or(configured)
 }
 
+/// Gives a translation the capitals of what it translates.
+///
+/// A menu set in capitals — `CONTINUE`, `SETTINGS` — comes back from an engine
+/// in lower case as often as not, and a button that used to shout now mumbles
+/// next to one that still shouts. The engines are not wrong, exactly: they
+/// translate words, and capitals on a button are typography. So that part is
+/// put back here: text that was all capitals stays all capitals, and text
+/// that began with one begins with one.
+fn match_case(original: &str, translated: &str) -> String {
+    let cased = || original.chars().filter(|c| c.is_uppercase() || c.is_lowercase());
+    // Two letters in capitals are as likely an abbreviation as a style.
+    if cased().count() >= 3 && cased().all(char::is_uppercase) {
+        return translated.to_uppercase();
+    }
+
+    let begins_with_capital = original
+        .chars()
+        .find(|c| c.is_alphabetic())
+        .is_some_and(char::is_uppercase);
+    if !begins_with_capital {
+        return translated.to_string();
+    }
+    let mut out = String::with_capacity(translated.len());
+    let mut seen_letter = false;
+    for c in translated.chars() {
+        if !seen_letter && c.is_alphabetic() {
+            seen_letter = true;
+            out.extend(c.to_uppercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The translation as one text, for the views that show it whole.
+///
+/// When every paragraph has its own line, those lines are the text: they have
+/// been through [`match_case`] and the engine's answer has not. Otherwise the
+/// answer is all there is, and it is given the same treatment in one piece.
+fn whole(segments: &[Segment], original: &str, answer: String) -> String {
+    if segments.is_empty() {
+        return match_case(original, &answer);
+    }
+    segments
+        .iter()
+        .map(|segment| segment.translated.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Pairs each recognised paragraph with its translation.
 ///
 /// The engines are asked to answer line for line, and nearly always do. When
@@ -335,7 +576,7 @@ pub fn align(blocks: &[TextBlock], translated: &str) -> Vec<Segment> {
             translated: if line.is_empty() {
                 block.text.clone()
             } else {
-                line.to_string()
+                match_case(&block.text, line)
             },
             glyph_height: block.glyph_height,
             lines: block.lines,
@@ -466,6 +707,112 @@ mod tests {
     fn with_no_guess_at_all_the_setting_stands() {
         assert_eq!(source_language("Hello", None, Language::Auto), Language::Auto);
         assert_eq!(source_language("Hello", None, Language::En), Language::En);
+    }
+
+    #[test]
+    fn a_menu_in_capitals_stays_in_capitals() {
+        assert_eq!(match_case("CONTINUE", "продолжить"), "ПРОДОЛЖИТЬ");
+        assert_eq!(match_case("NEW GAME", "Новая игра"), "НОВАЯ ИГРА");
+        assert_eq!(
+            match_case("PRESS E TO INTERACT", "нажмите E для взаимодействия"),
+            "НАЖМИТЕ E ДЛЯ ВЗАИМОДЕЙСТВИЯ"
+        );
+    }
+
+    #[test]
+    fn an_abbreviation_does_not_make_the_translation_shout() {
+        assert_eq!(match_case("OK", "хорошо"), "Хорошо");
+        assert_eq!(match_case("HP: 100", "ОЗ: 100"), "ОЗ: 100");
+    }
+
+    #[test]
+    fn text_that_began_with_a_capital_begins_with_one() {
+        assert_eq!(match_case("Settings", "настройки"), "Настройки");
+        assert_eq!(match_case("\"Stay here,\" she said.", "«оставайся здесь», — сказала она."),
+            "«Оставайся здесь», — сказала она.");
+        // And only the first letter is touched.
+        assert_eq!(match_case("Open the Gate", "открой ворота"), "Открой ворота");
+    }
+
+    #[test]
+    fn lower_case_and_caseless_text_is_left_as_the_engine_gave_it() {
+        assert_eq!(match_case("continue", "продолжить"), "продолжить");
+        assert_eq!(match_case("設定", "настройки"), "настройки");
+        assert_eq!(match_case("3 items", "3 предмета"), "3 предмета");
+    }
+
+    #[test]
+    fn each_paragraph_takes_its_own_capitals_and_the_whole_text_follows() {
+        let blocks = [block(0.0, "CONTINUE"), block(40.0, "Settings"), block(80.0, "exit")];
+        let segments = align(&blocks, "продолжить\nнастройки\nвыход");
+        let lines: Vec<&str> = segments.iter().map(|s| s.translated.as_str()).collect();
+        assert_eq!(lines, ["ПРОДОЛЖИТЬ", "Настройки", "выход"]);
+        assert_eq!(
+            whole(&segments, "CONTINUE\nSettings\nexit", "продолжить\nнастройки\nвыход".into()),
+            "ПРОДОЛЖИТЬ\nНастройки\nвыход"
+        );
+    }
+
+    #[test]
+    fn a_translation_with_no_places_is_still_given_its_capitals() {
+        assert_eq!(whole(&[], "GAME OVER", "игра окончена".into()), "ИГРА ОКОНЧЕНА");
+    }
+
+    #[test]
+    fn a_picture_that_was_to_stay_on_this_machine_is_not_shown_to_a_model() {
+        let mut engines = EngineSettings {
+            ai: true,
+            ..Default::default()
+        };
+        engines.ai_config.api_key = crate::shared::secret::Secret::new("k");
+        engines.ai_config.vision = true;
+        let mut params = PipelineParams {
+            source: Language::Auto,
+            target: Language::Ru,
+            engines,
+            recogniser: Recogniser::Auto,
+        };
+        // A region the user drew, and a model asked to read screenshots.
+        assert!(params.shows_the_model(CaptureKind::Region));
+        // A whole window is read first whatever happens, for the places.
+        assert!(!params.shows_the_model(CaptureKind::Whole));
+
+        params.recogniser = Recogniser::Local;
+        assert!(!params.shows_the_model(CaptureKind::Region));
+
+        params.recogniser = Recogniser::Online;
+        assert!(params.shows_the_model(CaptureKind::Region));
+        // And told to read online, nothing is read here.
+        assert_eq!(params.read_here_as(), None);
+    }
+
+    #[test]
+    fn what_is_on_screen_already_is_not_news() {
+        let again = Again {
+            shown: Some("The pass is closed.".into()),
+            settled: true,
+            ..Default::default()
+        };
+        assert!(!again.is_news("The pass is closed."));
+        assert!(again.is_news("You will have to wait."));
+    }
+
+    #[test]
+    fn over_a_moving_picture_a_text_is_news_once_it_has_been_read_twice() {
+        let mut again = Again {
+            shown: Some("The pass is closed.".into()),
+            ..Default::default()
+        };
+        // A line being typed out: never the same twice.
+        assert!(!again.is_news("You w"));
+        again.heard = Some("You w".into());
+        assert!(!again.is_news("You will have"));
+        // And then it is.
+        again.heard = Some("You will have to wait.".into());
+        assert!(again.is_news("You will have to wait."));
+        // Read twice or not, what is already up stays what it is.
+        again.heard = again.shown.clone();
+        assert!(!again.is_news("The pass is closed."));
     }
 
     #[test]

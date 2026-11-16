@@ -182,33 +182,83 @@ pub fn room_for(index: usize, blocks: &[Rect], bounds: Rect, gap: f32, grow: Gro
 /// Left alone, a column of labels that was perfectly uniform comes back in
 /// three slightly different sizes — and nothing looks more like a mistake.
 ///
-/// So sizes within `tolerance` of each other (1.3 means "up to 30 % larger")
-/// are treated as one size, and every paragraph of the group gets the group's
-/// median — of two, the smaller: type a little small still fits where it has
-/// to go. A heading stays a heading: it is more than a rounding error away.
-pub fn harmonise(sizes: &[f32], tolerance: f32) -> Vec<f32> {
-    let mut order: Vec<usize> = (0..sizes.len()).collect();
-    order.sort_by(|a, b| {
-        sizes[*a]
-            .partial_cmp(&sizes[*b])
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+/// So sizes close enough to each other are treated as one size, and every
+/// paragraph of the group gets the group's median — of two, the smaller: type
+/// a little small still fits where it has to go. A heading stays a heading:
+/// it is more than a rounding error away.
+///
+/// How close is close enough depends on where a size came from. One measured
+/// off the pixels (`measured`) is good to a pixel or so and is grouped
+/// tightly. One guessed from a recogniser's box is not, so it takes the size
+/// of the nearest measured group it could plausibly belong to — on a screen
+/// where most lines could be measured, the few that could not are almost
+/// always more of the same.
+///
+/// The groups are found where the sizes fall apart, not by counting off
+/// windows from the smallest. A window has an edge, and two lines of one
+/// paragraph that measured 22.0 and 22.2 can stand either side of it: one was
+/// then set with the 18s below and the other with the 23s above.
+pub fn harmonise(sizes: &[f32], measured: &[bool]) -> Vec<f32> {
+    /// How far apart two measured sizes can be and still be one size.
+    const MEASURED: f32 = 1.12;
+    /// The same for sizes guessed from a box.
+    const GUESSED: f32 = 1.3;
+
+    let ascending = |mut indices: Vec<usize>| {
+        indices.sort_by(|a, b| {
+            sizes[*a]
+                .partial_cmp(&sizes[*b])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        indices
+    };
+    let is_measured = |index: usize| measured.get(index).copied().unwrap_or(false);
+    let apart = |a: f32, b: f32| a.max(b) / a.min(b).max(f32::EPSILON);
 
     let mut out = sizes.to_vec();
-    let mut start = 0;
-    while start < order.len() {
-        let smallest = sizes[order[start]];
-        let mut end = start + 1;
-        while end < order.len() && sizes[order[end]] <= smallest * tolerance {
-            end += 1;
+    let exact = ascending((0..sizes.len()).filter(|i| is_measured(*i)).collect());
+    settle(&exact, sizes, MEASURED, &mut out);
+
+    let mut loose = Vec::new();
+    for index in (0..sizes.len()).filter(|i| !is_measured(*i)) {
+        let nearest = exact.iter().map(|m| out[*m]).min_by(|a, b| {
+            apart(*a, sizes[index])
+                .partial_cmp(&apart(*b, sizes[index]))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        match nearest {
+            Some(size) if apart(size, sizes[index]) <= GUESSED => out[index] = size,
+            _ => loose.push(index),
         }
-        let median = sizes[order[start + (end - start - 1) / 2]];
-        for &index in &order[start..end] {
+    }
+    settle(&ascending(loose), sizes, GUESSED, &mut out);
+    out
+}
+
+/// Gives every size in `run` — indices into `sizes`, ascending by size — the
+/// median of its group. A run that spans more than `tolerance` is not one
+/// group: it is parted at its widest gap, and each part settled by itself.
+fn settle(run: &[usize], sizes: &[f32], tolerance: f32, out: &mut [f32]) {
+    let (Some(&first), Some(&last)) = (run.first(), run.last()) else {
+        return;
+    };
+    if sizes[last] <= sizes[first] * tolerance {
+        let median = sizes[run[(run.len() - 1) / 2]];
+        for &index in run {
             out[index] = median;
         }
-        start = end;
+        return;
     }
-    out
+    let gap = |at: usize| sizes[run[at]] / sizes[run[at - 1]].max(f32::EPSILON);
+    let cut = (1..run.len())
+        .max_by(|a, b| {
+            gap(*a)
+                .partial_cmp(&gap(*b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .unwrap_or(1);
+    settle(&run[..cut], sizes, tolerance, out);
+    settle(&run[cut..], sizes, tolerance, out);
 }
 
 /// Moves plates that ended up on top of each other apart, top to bottom.
@@ -401,20 +451,20 @@ mod tests {
 
     #[test]
     fn of_two_sizes_taken_as_one_the_smaller_is_kept() {
-        assert_eq!(harmonise(&[24.0, 26.0], 1.3), vec![24.0, 24.0]);
+        assert_eq!(harmonise(&[24.0, 26.0], &[false; 2]), vec![24.0, 24.0]);
     }
 
     #[test]
     fn sizes_a_rounding_error_apart_become_one_size() {
         // Three labels and one that measured taller because of a descender.
-        let out = harmonise(&[20.0, 21.0, 25.5, 20.5], 1.3);
+        let out = harmonise(&[20.0, 21.0, 25.5, 20.5], &[false; 4]);
         assert!(out.iter().all(|s| *s == out[0]), "{out:?}");
         assert!((20.0..=21.0).contains(&out[0]), "{out:?}");
     }
 
     #[test]
     fn a_heading_keeps_its_own_size() {
-        let out = harmonise(&[34.0, 20.0, 21.0, 13.0], 1.3);
+        let out = harmonise(&[34.0, 20.0, 21.0, 13.0], &[false; 4]);
         assert_eq!(out[0], 34.0);
         assert_eq!(out[1], out[2]);
         assert_eq!(out[3], 13.0);
@@ -423,7 +473,7 @@ mod tests {
 
     #[test]
     fn harmonising_keeps_every_size_in_its_original_position() {
-        let out = harmonise(&[13.0, 34.0, 13.5], 1.3);
+        let out = harmonise(&[13.0, 34.0, 13.5], &[false; 3]);
         assert_eq!(out.len(), 3);
         assert_eq!(out[1], 34.0);
         assert_eq!(out[0], out[2]);
@@ -431,8 +481,51 @@ mod tests {
 
     #[test]
     fn nothing_to_harmonise_is_nothing() {
-        assert!(harmonise(&[], 1.3).is_empty());
-        assert_eq!(harmonise(&[17.0], 1.3), vec![17.0]);
+        assert!(harmonise(&[], &[]).is_empty());
+        assert_eq!(harmonise(&[17.0], &[false]), vec![17.0]);
+        assert_eq!(harmonise(&[17.0], &[true]), vec![17.0]);
+    }
+
+    #[test]
+    fn two_lines_of_one_paragraph_never_end_up_in_different_sizes() {
+        // A whole screen: a panel of 18s, a paragraph whose two lines
+        // measured 22.0 and 22.2, a line above them at 22.6, one tiny line
+        // that could not be measured at all. Counted off in windows from the
+        // smallest, the 22.0 fell in with the 18s and the 22.2 did not.
+        let sizes = [18.0, 22.0, 18.0, 22.2, 17.0, 18.0, 22.6, 30.0];
+        let measured = [true, true, true, true, false, true, true, true];
+        let out = harmonise(&sizes, &measured);
+        assert_eq!(out[1], out[3], "{out:?}");
+        assert_eq!(out[1], out[6], "{out:?}");
+        assert!((22.0..=22.6).contains(&out[1]), "{out:?}");
+        assert_eq!([out[0], out[2], out[5]], [18.0; 3]);
+        assert_eq!(out[7], 30.0);
+    }
+
+    #[test]
+    fn a_guess_takes_the_measured_size_it_is_nearest_to() {
+        // 17 is a guess from a box; the 18s were measured. It is one of them.
+        let out = harmonise(&[18.0, 18.0, 17.0, 30.0], &[true, true, false, true]);
+        assert_eq!(out[2], 18.0);
+        // A guess nowhere near anything measured keeps its own counsel.
+        let out = harmonise(&[18.0, 44.0, 30.0], &[true, false, true]);
+        assert_eq!(out[1], 44.0);
+    }
+
+    #[test]
+    fn measured_sizes_are_held_to_a_tighter_standard_than_guesses() {
+        // 20 and 25 as guesses are one size; measured, they are two.
+        assert_eq!(harmonise(&[20.0, 25.0], &[false; 2]), vec![20.0, 20.0]);
+        assert_eq!(harmonise(&[20.0, 25.0], &[true; 2]), vec![20.0, 25.0]);
+    }
+
+    #[test]
+    fn a_long_run_of_sizes_parts_at_its_widest_gap() {
+        let out = harmonise(&[13.0, 13.4, 18.0, 18.3, 18.9], &[true; 5]);
+        assert_eq!(out[0], out[1]);
+        assert_eq!(out[2], out[3]);
+        assert_eq!(out[3], out[4]);
+        assert!(out[1] < out[2]);
     }
 
     #[test]

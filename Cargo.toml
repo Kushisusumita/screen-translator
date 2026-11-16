@@ -92,6 +92,14 @@ windows = { version = "0.58", features = [
     "Win32_System_Threading",
     # GetUserDefaultLocaleName, for the interface language at first launch.
     "Win32_Globalization",
+    # The text recogniser built into Windows, and what it is handed a picture
+    # in: reading a capture on the machine itself instead of sending it off.
+    "Media_Ocr",
+    "Graphics_Imaging",
+    "Globalization",
+    "Foundation_Collections",
+    # IMemoryBufferByteAccess, for writing pixels straight into that picture.
+    "Win32_System_WinRT",
 ] }
 winreg = "0.52"
 # Action Center toasts for the "update available" notification.
